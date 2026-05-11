@@ -161,6 +161,11 @@ class GmailSendBody(BaseModel):
     subject: str
     body: str
     cc: str = ""
+    # Optional single attachment. Pass the file content as base64 (one-line,
+    # no wrapping — produced by `base64 -w 0`). MIME type is inferred from
+    # the filename; falls back to application/octet-stream.
+    attachment_filename: str = ""
+    attachment_content_b64: str = ""
 
 
 class GmailReplyBody(BaseModel):
@@ -303,9 +308,36 @@ async def send_email(
         return {"error": "Gmail not authenticated"}
 
     try:
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.base import MIMEBase
         from email.mime.text import MIMEText
+        from email import encoders
+        import mimetypes
 
-        msg = MIMEText(body.body)
+        has_attachment = bool(body.attachment_filename and body.attachment_content_b64)
+
+        if has_attachment:
+            msg = MIMEMultipart()
+            msg.attach(MIMEText(body.body, "plain"))
+
+            ctype, _ = mimetypes.guess_type(body.attachment_filename)
+            if ctype is None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+
+            attachment_bytes = base64.b64decode(body.attachment_content_b64)
+            part = MIMEBase(maintype, subtype)
+            part.set_payload(attachment_bytes)
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=body.attachment_filename,
+            )
+            msg.attach(part)
+        else:
+            msg = MIMEText(body.body)
+
         msg["to"] = body.to
         msg["subject"] = body.subject
         if body.cc:
