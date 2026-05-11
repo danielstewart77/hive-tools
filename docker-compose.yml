@@ -1,0 +1,20 @@
+services:
+  hive-tools:
+    build: .
+    container_name: hive-tools
+    env_file: .env
+    ports:
+      - "9421:9421"
+    volumes:
+      - ./credentials:/app/credentials:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - /home/daniel/Storage/Dev:/home/daniel/Storage/Dev:ro
+    restart: unless-stopped
+    networks:
+      - hivemind
+
+networks:
+  hivemind:
+    external: true
+    name: hivemind

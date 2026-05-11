@@ -1,0 +1,112 @@
+{% extends "layout.html" %}
+{% block title %}HiveTools — Tools{% endblock %}
+{% block content %}
+<h1>Tool HITL Settings</h1>
+
+{% macro tool_row(tool) %}
+<tr>
+  <td style="white-space:nowrap;">
+    <span class="method-badge method-{{ tool.method }}">{{ tool.method }}</span>
+    <span style="font-family:monospace; font-size:12px; margin-left:8px;">{{ tool.tool_name }}</span>
+  </td>
+  <td>
+    <form method="POST" action="/tools/settings"
+          style="display:flex; align-items:center; gap:10px;" data-tool-form>
+      <input type="hidden" name="tool_name" value="{{ tool.tool_name }}">
+
+      <div class="mode-toggle">
+        <input type="radio" name="mode" id="off-{{ tool.tool_name }}"  value="off"  {% if tool.mode == 'off'  %}checked{% endif %}>
+        <label for="off-{{ tool.tool_name }}">Off</label>
+        <input type="radio" name="mode" id="on-{{ tool.tool_name }}"   value="on"   {% if tool.mode == 'on'   %}checked{% endif %}>
+        <label for="on-{{ tool.tool_name }}">On</label>
+        <input type="radio" name="mode" id="sudo-{{ tool.tool_name }}" value="sudo" {% if tool.mode == 'sudo' %}checked{% endif %}>
+        <label for="sudo-{{ tool.tool_name }}">Sudo</label>
+      </div>
+
+      <div class="sudo-timeout-field {% if tool.mode == 'sudo' %}visible{% endif %}">
+        <input type="number" name="sudo_timeout_minutes"
+               value="{{ tool.sudo_timeout_minutes }}"
+               style="width:58px;" min="1" max="1440" title="Sudo timeout (minutes)">
+        <span>min</span>
+      </div>
+
+      <button type="submit" class="btn btn-primary btn-sm">Save</button>
+    </form>
+  </td>
+</tr>
+{% endmacro %}
+
+{% set groups = [
+    ("Calendar",  "&#128197;", "calendar"),
+    ("Gmail",     "&#9993;",   "gmail"),
+    ("Docker",    "&#128225;", "docker"),
+    ("LinkedIn",  "&#128101;", "linkedin"),
+] %}
+
+{% for label, icon, prefix in groups %}
+  {% set group_tools = [] %}
+  {% for t in tools if t.tool_name.startswith(prefix) %}
+    {% set _ = group_tools.append(t) %}
+  {% endfor %}
+  {% if group_tools %}
+  <details open class="card">
+    <summary class="card-header">
+      <span style="font-size:18px;">{{ icon | safe }}</span>
+      <h2>{{ label }}</h2>
+      <span class="group-count">{{ group_tools | length }}</span>
+      <span class="chevron">&#9660;</span>
+    </summary>
+    <div class="card-body">
+      <table>
+        <thead>
+          <tr><th>Tool</th><th>Mode / Action</th></tr>
+        </thead>
+        <tbody>
+          {% for tool in group_tools %}{{ tool_row(tool) }}{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+{% endfor %}
+
+{% set known_prefixes = ["calendar", "gmail", "docker", "linkedin"] %}
+{% set other_tools = [] %}
+{% for t in tools %}
+  {% set matched = [] %}
+  {% for p in known_prefixes if t.tool_name.startswith(p) %}{% set _ = matched.append(1) %}{% endfor %}
+  {% if not matched %}{% set _ = other_tools.append(t) %}{% endif %}
+{% endfor %}
+
+{% if other_tools %}
+<details open class="card">
+  <summary class="card-header">
+    <span style="font-size:18px;">&#128295;</span>
+    <h2>Other</h2>
+    <span class="group-count">{{ other_tools | length }}</span>
+    <span class="chevron">&#9660;</span>
+  </summary>
+  <div class="card-body">
+    <table>
+      <thead><tr><th>Tool</th><th>Mode / Action</th></tr></thead>
+      <tbody>
+        {% for tool in other_tools %}{{ tool_row(tool) }}{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+<script>
+document.querySelectorAll('[data-tool-form]').forEach(function(form) {
+    function sync() {
+        var sudo = form.querySelector('input[value="sudo"]').checked;
+        var field = form.querySelector('.sudo-timeout-field');
+        field.classList.toggle('visible', sudo);
+    }
+    form.querySelectorAll('input[name="mode"]').forEach(function(r) {
+        r.addEventListener('change', sync);
+    });
+});
+</script>
+{% endblock %}

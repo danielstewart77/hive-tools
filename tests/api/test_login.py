@@ -1,0 +1,53 @@
+"""API tests for login endpoints."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from auth_session import create_user
+
+
+@pytest.fixture()
+def app(tmp_path: Path) -> FastAPI:
+    from server import create_app
+
+    return create_app(db_path=str(tmp_path / "test.db"))
+
+
+@pytest.fixture()
+def client(app: FastAPI) -> TestClient:
+    return TestClient(app, follow_redirects=False)
+
+
+def test_get_login_page_returns_html(client: TestClient) -> None:
+    resp = client.get("/login")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+
+
+def test_post_login_valid_sets_cookie(app: FastAPI, client: TestClient) -> None:
+    create_user(app.state.db, "daniel", "pass123", is_admin=True)
+    resp = client.post(
+        "/login",
+        data={"username": "daniel", "password": "pass123"},
+    )
+    assert resp.status_code in (302, 303)
+    assert "ht_session" in resp.cookies
+
+
+def test_post_login_invalid_returns_401(client: TestClient) -> None:
+    resp = client.post(
+        "/login",
+        data={"username": "wrong", "password": "wrong"},
+    )
+    assert resp.status_code == 401
+
+
+def test_authenticated_route_without_session_redirects(client: TestClient) -> None:
+    resp = client.get("/")
+    # Should redirect to login or return 401
+    assert resp.status_code in (302, 303, 401)

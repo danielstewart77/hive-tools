@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+jinja2
+itsdangerous
+bcrypt
+aiohttp
+httpx
+google-api-python-client
+google-auth
+google-auth-oauthlib
+python-multipart
+playwright
+pytest
+mypy
+ruff
