@@ -186,6 +186,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
     except ImportError:
         pass
 
+    try:
+        from tools.schema import router as schema_router
+
+        app.include_router(schema_router)
+    except ImportError:
+        pass
+
     # Include UI router
     try:
         from ui import router as ui_router

@@ -125,6 +125,9 @@ _DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
     # Ollama generic LLM endpoints — read-only side effects, no approval needed
     ("ollama_structured", "off", 15),
     ("ollama_chat", "off", 15),
+    # Schema mutation — always HITL-gated. Adding new node/edge types is a
+    # durable schema decision and should never auto-execute.
+    ("schema_new_type", "on", 15),
 ]
 
 
