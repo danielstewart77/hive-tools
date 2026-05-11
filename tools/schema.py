@@ -51,6 +51,11 @@ class RequestNewTypeBody(BaseModel):
     name: str  # the type / edge name (e.g. "ProjectMilestone", "TRACKS")
     description: str = ""
     schema_def: dict  # property_schema (for nodes) or attr_schema (for edges)
+    # Node-only: lucent distinguishes first-class (addressed by name in
+    # conversation, e.g. Person/Mind/Device) from second-class (facet
+    # nodes reached via edges, e.g. ContactMethod). Defaults to
+    # second-class because most new types are facets.
+    node_class: str = "second-class"
     # Edge-only fields:
     source_type: str = ""
     target_type: str = ""
@@ -114,11 +119,17 @@ async def request_new_type(
     → gate bypasses → this body runs → forwards to lucent admin endpoint.
     """
     if body.kind == "node":
+        if body.node_class not in ("first-class", "second-class"):
+            return {
+                "ok": False,
+                "code": "invalid_node_class",
+                "detail": f"node_class must be 'first-class' or 'second-class', got {body.node_class!r}",
+            }
         return _lucent_admin_call(
             "/graph/schema/types",
             {
                 "name": body.name,
-                "kind": "second-class",  # new types default to second-class
+                "kind": body.node_class,
                 "property_schema": body.schema_def,
             },
         )
