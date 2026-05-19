@@ -20,7 +20,13 @@ from auth_session import (
 )
 from config import BASE_DIR, DB_PATH
 from db import init_db
-from hitl import HITLPendingException, _replay_request_async, get_hitl_status, respond_to_hitl
+from hitl import (
+    HITLPendingException,
+    _replay_request_async,
+    get_hitl_status,
+    respond_to_hitl,
+    sync_tool_registry,
+)
 from schemas import HITLRespondRequest
 
 log = logging.getLogger(__name__)
@@ -200,6 +206,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
         app.include_router(ui_router)
     except ImportError:
         pass
+
+    # All tool routers have been imported by this point, so hitl_gate()
+    # side effects have populated hitl._REGISTERED_TOOLS. Sync any gated
+    # tool that doesn't yet have a row into tool_hitl_settings with the
+    # default mode='on' so the control panel surfaces it automatically.
+    sync_tool_registry(conn)
 
     return app
 

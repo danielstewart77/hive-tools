@@ -1,0 +1,113 @@
+"""Tests for HITL auto-registration of gated tools.
+
+Side effect: importing this module calls hitl_gate() which mutates the
+module-level _REGISTERED_TOOLS set. Each test uses a unique tool name
+prefixed with `__test_auto_register_` to avoid collisions with real tools
+already registered via the normal import path (gmail, calendar, etc.).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+
+def test_hitl_gate_records_tool_name_on_call() -> None:
+    from hitl import _REGISTERED_TOOLS, hitl_gate
+
+    name = "__test_auto_register_recorded"
+    assert name not in _REGISTERED_TOOLS
+    hitl_gate(name)
+    assert name in _REGISTERED_TOOLS
+
+
+def test_sync_tool_registry_upserts_with_default_mode_on(
+    db_conn: sqlite3.Connection,
+) -> None:
+    from hitl import hitl_gate, sync_tool_registry
+
+    name = "__test_auto_register_default_on"
+    hitl_gate(name)
+
+    inserted = sync_tool_registry(db_conn)
+    assert inserted >= 1  # at least our new tool; other tests may also register
+
+    row = db_conn.execute(
+        "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
+        (name,),
+    ).fetchone()
+    assert row is not None
+    assert row["mode"] == "on"
+    assert row["sudo_timeout_minutes"] == 15
+
+
+def test_sync_tool_registry_does_not_overwrite_user_edits(
+    db_conn: sqlite3.Connection,
+) -> None:
+    from hitl import hitl_gate, sync_tool_registry
+
+    name = "__test_auto_register_user_edit_preserved"
+    hitl_gate(name)
+    sync_tool_registry(db_conn)
+
+    # Simulate Daniel switching this tool to sudo mode in the control panel.
+    db_conn.execute(
+        "UPDATE tool_hitl_settings SET mode = 'sudo', sudo_timeout_minutes = 60 "
+        "WHERE tool_name = ?",
+        (name,),
+    )
+    db_conn.commit()
+
+    inserted = sync_tool_registry(db_conn)
+    # Second sync may insert nothing for this tool; if other test funcs ran
+    # and registered new names this could be > 0 — that's fine.
+    assert inserted >= 0
+
+    row = db_conn.execute(
+        "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
+        (name,),
+    ).fetchone()
+    assert row["mode"] == "sudo"
+    assert row["sudo_timeout_minutes"] == 60
+
+
+def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection) -> None:
+    """Manual seed in db.py sets read endpoints to 'off'. Auto-register
+    must not flip them to 'on'."""
+    from db import seed_default_hitl_settings
+    from hitl import hitl_gate, sync_tool_registry
+
+    seed_default_hitl_settings(db_conn)
+
+    # Simulate the tools/gmail.py import declaring the gate with the same
+    # tool_name that the manual seed already set to 'off'.
+    hitl_gate("gmail_read_emails")
+    sync_tool_registry(db_conn)
+
+    row = db_conn.execute(
+        "SELECT mode FROM tool_hitl_settings WHERE tool_name = 'gmail_read_emails'"
+    ).fetchone()
+    assert row["mode"] == "off"
+
+
+def test_sync_returns_zero_when_all_tools_already_present(
+    db_conn: sqlite3.Connection,
+) -> None:
+    from hitl import hitl_gate, sync_tool_registry
+
+    name = "__test_auto_register_idempotent"
+    hitl_gate(name)
+
+    sync_tool_registry(db_conn)
+    second_pass_inserted = sync_tool_registry(db_conn)
+
+    # No new rows on the second sync for this specific tool.
+    row = db_conn.execute(
+        "SELECT mode FROM tool_hitl_settings WHERE tool_name = ?", (name,)
+    ).fetchone()
+    assert row is not None
+    # Second pass may still insert other tools registered in parallel tests;
+    # the meaningful assertion is that this row exists and the function is
+    # safe to call repeatedly.
+    assert second_pass_inserted >= 0

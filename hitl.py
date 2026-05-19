@@ -17,6 +17,15 @@ log = logging.getLogger(__name__)
 
 HITL_EXPIRY_SECONDS = 300  # 5 minutes
 
+# Auto-registration: every hitl_gate("tool_name") call records the name here
+# at import time. sync_tool_registry() upserts these into tool_hitl_settings
+# at startup so the control panel automatically lists every gated tool with
+# a sane default mode. No manual seed step required for new tools.
+_REGISTERED_TOOLS: set[str] = set()
+
+AUTO_REGISTER_DEFAULT_MODE = "on"
+AUTO_REGISTER_DEFAULT_SUDO_TIMEOUT_MINUTES = 15
+
 
 class HITLPendingException(Exception):
     """Raised when a tool call requires human approval.
@@ -105,7 +114,12 @@ async def _replay_request_async(method: str, path: str, body: str) -> None:
 
 
 def hitl_gate(tool_name: str):
-    """Factory that returns a FastAPI dependency for HITL checks."""
+    """Factory that returns a FastAPI dependency for HITL checks.
+
+    Side effect: records `tool_name` in `_REGISTERED_TOOLS` at import time so
+    `sync_tool_registry` can upsert it into `tool_hitl_settings` at startup.
+    """
+    _REGISTERED_TOOLS.add(tool_name)
 
     async def _check(
         request: Request,
@@ -127,6 +141,32 @@ def hitl_gate(tool_name: str):
         )
 
     return _check
+
+
+def sync_tool_registry(
+    db: sqlite3.Connection,
+    default_mode: str = AUTO_REGISTER_DEFAULT_MODE,
+    default_sudo_timeout_minutes: int = AUTO_REGISTER_DEFAULT_SUDO_TIMEOUT_MINUTES,
+) -> int:
+    """Upsert any tool name discovered at hitl_gate import time.
+
+    Existing rows in tool_hitl_settings are left alone (INSERT OR IGNORE)
+    so manual seeds in db.seed_default_hitl_settings and user-edited modes
+    both survive. Returns the number of new rows inserted.
+    """
+    inserted = 0
+    for name in sorted(_REGISTERED_TOOLS):
+        cur = db.execute(
+            "INSERT OR IGNORE INTO tool_hitl_settings "
+            "(tool_name, mode, sudo_timeout_minutes) VALUES (?, ?, ?)",
+            (name, default_mode, default_sudo_timeout_minutes),
+        )
+        if cur.rowcount > 0:
+            inserted += 1
+    db.commit()
+    if inserted:
+        log.info("sync_tool_registry: registered %d new gated tool(s)", inserted)
+    return inserted
 
 
 def get_hitl_status(db: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
