@@ -1,6 +1,6 @@
 """Ollama generic-LLM router for hive-tools.
 
-Two endpoints, model-agnostic:
+Three endpoints, model-agnostic:
 
 - POST /ollama/structured — structured output. Caller supplies a JSON schema;
   the schema is passed straight to Ollama's `format` field (Ollama v0.5+
@@ -10,8 +10,14 @@ Two endpoints, model-agnostic:
 - POST /ollama/chat — conversational text output. Caller supplies a prompt
   (and optional system prompt). Returns the model's text response verbatim.
 
-Both endpoints accept `model` (defaults to OLLAMA_DEFAULT_MODEL env or
-`gpt-oss:20b-32k`). HITL gating is per-endpoint.
+- GET /ollama/models — list models the configured Ollama instance is serving.
+  Powers each mind's `/models` slash command. Hive-tools is the single
+  wrapper around Ollama regardless of where Ollama runs (host, container,
+  remote), so every mind asks the same shape and gets the same answer.
+
+The chat/structured endpoints accept `model` (defaults to
+OLLAMA_DEFAULT_MODEL env or `gpt-oss:20b-32k`). HITL gating is
+per-endpoint.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from auth_api import require_api_token
 from hitl import hitl_gate
 
 log = logging.getLogger(__name__)
@@ -114,3 +121,52 @@ async def chat(
         model=model, prompt=body.prompt, system=body.system, fmt=None
     )
     return {"response": payload.get("message", {}).get("content", "")}
+
+
+@router.get("/models")
+async def models(caller: str = Depends(require_api_token)) -> dict[str, Any]:
+    """List the models served by the configured Ollama instance.
+
+    Read-only metadata; no HITL gate. Each mind's `/models` slash-command
+    calls this so the user can see what's available without poking the
+    Ollama server directly. Wraps Ollama's `/api/tags`.
+
+    Returns:
+        {
+            "ollama_base_url": "http://...",
+            "default_model": "gpt-oss:20b-32k",
+            "models": [
+                {"name": "...", "size": 12345, "modified_at": "...", "family": "..."},
+                ...
+            ]
+        }
+
+    On Ollama unreachable: 502 with the error detail. Empty model list is
+    not an error — Ollama just hasn't pulled anything yet.
+    """
+    del caller
+    try:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT_SECONDS) as client:
+            resp = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
+        log.exception("Ollama /api/tags failed")
+        raise HTTPException(status_code=502, detail=f"ollama unreachable: {e}") from e
+
+    raw = resp.json().get("models", [])
+    flat = [
+        {
+            "name": m.get("name", ""),
+            "size": m.get("size"),
+            "modified_at": m.get("modified_at"),
+            "family": (m.get("details") or {}).get("family"),
+            "parameter_size": (m.get("details") or {}).get("parameter_size"),
+            "quantization": (m.get("details") or {}).get("quantization_level"),
+        }
+        for m in raw
+    ]
+    return {
+        "ollama_base_url": OLLAMA_BASE_URL,
+        "default_model": OLLAMA_DEFAULT_MODEL,
+        "models": flat,
+    }
