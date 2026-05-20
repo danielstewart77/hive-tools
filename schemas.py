@@ -122,3 +122,15 @@ class DockerOpsRequest(BaseModel):
     project: str
     service: str = ""
     tail: int = 50
+
+
+# --- SMS ---
+
+
+class SmsSendRequest(BaseModel):
+    to: str
+    body: str
+
+
+class SmsInboundEnabledRequest(BaseModel):
+    enabled: bool

@@ -193,6 +193,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
         pass
 
     try:
+        from tools.sms import router as sms_router
+
+        app.include_router(sms_router)
+    except ImportError:
+        pass
+
+    try:
         from tools.schema import router as schema_router
 
         app.include_router(schema_router)
