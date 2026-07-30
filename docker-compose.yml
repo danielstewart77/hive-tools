@@ -10,11 +10,86 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
       - /home/daniel/Storage/Dev:/home/daniel/Storage/Dev:ro
+      # The training pipeline writes curation verdicts back onto
+      # training_turns.db, appends to the run ledger, and drops exported
+      # JSONL beside them. Same host path as the read-only mount above,
+      # re-mounted read-write and scoped to that one directory so the
+      # blast radius of "hive-tools can write into hive_mind" stays legible.
+      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/data:/home/daniel/Storage/Dev/hive_mind/data:rw
     restart: unless-stopped
     networks:
       - hivemind
+      - sms-private
+
+  sms-gateway-db:
+    image: mariadb:lts
+    container_name: sms-gateway-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${SMS_GATEWAY_DB_ROOT_PASSWORD}
+      - MYSQL_DATABASE=sms
+      - MYSQL_USER=sms
+      - MYSQL_PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - MARIADB_AUTO_UPGRADE=1
+    volumes:
+      - sms-gateway-db-data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - sms-private
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  sms-gateway:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
+
+  sms-gateway-worker:
+    image: capcom6/sms-gateway:latest
+    container_name: sms-gateway-worker
+    command: ["/app/app", "worker"]
+    environment:
+      - HTTP__LISTEN=0.0.0.0:3000
+      - DATABASE__HOST=sms-gateway-db
+      - DATABASE__PORT=3306
+      - DATABASE__USER=sms
+      - DATABASE__PASSWORD=${SMS_GATEWAY_DB_PASSWORD}
+      - DATABASE__DATABASE=sms
+      - GATEWAY__MODE=private
+      - GATEWAY__PRIVATE_TOKEN=${SMS_GATEWAY_PRIVATE_TOKEN}
+      - JWT__SECRET=${SMS_GATEWAY_JWT_SECRET}
+    restart: unless-stopped
+    networks:
+      - sms-private
+    depends_on:
+      sms-gateway-db:
+        condition: service_healthy
 
 networks:
   hivemind:
     external: true
     name: hivemind
+  sms-private:
+    external: true
+    name: sms-private
+
+volumes:
+  sms-gateway-db-data:

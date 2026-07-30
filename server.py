@@ -27,9 +27,10 @@ from hitl import (
     respond_to_hitl,
     sync_tool_registry,
 )
+from hive_logging import configure_logging, install_fastapi_logging, log_event
 from schemas import HITLRespondRequest
 
-log = logging.getLogger(__name__)
+log = configure_logging("hive-tools")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -37,6 +38,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 def create_app(db_path: str | None = None) -> FastAPI:
     """Application factory."""
     app = FastAPI(title="HiveTools", version="0.1.0")
+    install_fastapi_logging(app, log, "hive-tools")
 
     # Initialize database
     resolved_path = db_path or DB_PATH
@@ -77,11 +79,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
     ) -> Any:
         user = verify_user_credentials(app.state.db, username, password)
         if not user:
+            log_event(log, "tools.login.rejected", level=logging.WARNING, username=username)
             return JSONResponse(
                 {"detail": "Invalid credentials"}, status_code=401
             )
         response = RedirectResponse(url="/", status_code=303)
         set_session_cookie(response, user)
+        log_event(log, "tools.login.succeeded", username=username)
         return response
 
     # ---- HITL polling endpoints ----
@@ -118,6 +122,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
         if "error" in result and result["error"] == "already_resolved":
             return JSONResponse(result, status_code=409)
         replay = result.pop("_replay", None)
+        log_event(
+            log, "hitl.responded", request_id=request_id, action=body.action,
+            caller=caller, replay_scheduled=bool(replay),
+        )
         if replay:
             asyncio.create_task(_replay_request_async(**replay))
         return JSONResponse(result, status_code=200)
@@ -200,6 +208,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
         pass
 
     try:
+        from tools.training import router as training_router
+
+        app.include_router(training_router)
+    except ImportError:
+        pass
+
+    try:
         from tools.schema import router as schema_router
 
         app.include_router(schema_router)
@@ -231,4 +246,4 @@ if __name__ == "__main__":
     import uvicorn
 
     log.info("Starting HiveTools on 0.0.0.0:9421")
-    uvicorn.run(app, host="0.0.0.0", port=9421)
+    uvicorn.run(app, host="0.0.0.0", port=9421, log_config=None, access_log=False)
