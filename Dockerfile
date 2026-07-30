@@ -37,7 +37,7 @@ RUN playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright
 
 # Copy application code
-COPY server.py config.py db.py schemas.py hitl.py auth_api.py auth_session.py ui.py ./
+COPY server.py config.py db.py schemas.py hitl.py auth_api.py auth_session.py ui.py hive_logging.py ./
 COPY tools/ tools/
 COPY templates/ templates/
 

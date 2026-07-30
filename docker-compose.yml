@@ -16,6 +16,17 @@ services:
       # re-mounted read-write and scoped to that one directory so the
       # blast radius of "hive-tools can write into hive_mind" stays legible.
       - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/data:/home/daniel/Storage/Dev/hive_mind/data:rw
+    # The fine-tune planner decides whether a run can start by asking
+    # nvidia-smi how much VRAM is free. Without the nvidia runtime that
+    # binary does not exist in here, every plan comes back "no GPU visible",
+    # and the Launch button can never do anything. `utility` injects the
+    # management library and nvidia-smi only — no CUDA runtime, because
+    # nothing in this container computes; the trainer container it starts is
+    # the one that gets the whole GPU.
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=utility
     restart: unless-stopped
     networks:
       - hivemind

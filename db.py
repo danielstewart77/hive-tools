@@ -128,6 +128,13 @@ _DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
     # Schema mutation — always HITL-gated. Adding new node/edge types is a
     # durable schema decision and should never auto-execute.
     ("schema_new_type", "on", 15),
+    # Training pipeline — off, because the only caller is the console and a
+    # console click is already a human act taken behind a login. Gating them
+    # would page the same person who just pressed the button, and the panel
+    # would sit on a pending response with nothing to show.
+    ("training_curate", "off", 15),
+    ("training_export", "off", 15),
+    ("training_train", "off", 15),
 ]
 
 

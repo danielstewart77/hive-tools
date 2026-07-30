@@ -156,16 +156,16 @@ def test_export_translates_mode_and_filters(client, auth_headers, fake_cli):
     assert "--no-system-prompt" in args
 
 
-def test_export_defaults_to_keeping_credentials(client, auth_headers, fake_cli):
-    """The corpus trains a local model that needs the real values."""
+def test_export_defaults_to_randomizing_credentials(client, auth_headers, fake_cli):
+    """Same default as the CLI: a surrogate, never a real value by accident."""
     with _patch_run(fake_cli, {"train_examples": 1}):
         client.post("/training/export", headers=auth_headers, json={"name": "raw"})
     args = _args(fake_cli)
-    assert args[args.index("--secrets") + 1] == "keep"
+    assert args[args.index("--secrets") + 1] == "randomize"
 
 
 def test_export_forwards_the_chosen_secret_policy(client, auth_headers, fake_cli):
-    for policy in ("randomize", "redact"):
+    for policy in ("keep", "redact"):
         with _patch_run(fake_cli, {"train_examples": 1}):
             client.post(
                 "/training/export",

@@ -64,3 +64,9 @@ def test_default_modes_match_spec(db_conn: sqlite3.Connection) -> None:
     assert get_mode("calendar_create_event") == "on"
     assert get_mode("linkedin_post") == "on"
     assert get_mode("docker_compose_up") == "on"
+
+    # Training tools are driven from the console, whose login is the gate;
+    # gating them would page the person who just clicked the button.
+    assert get_mode("training_curate") == "off"
+    assert get_mode("training_export") == "off"
+    assert get_mode("training_train") == "off"

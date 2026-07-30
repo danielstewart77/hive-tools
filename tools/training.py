@@ -158,16 +158,16 @@ class ExportRequest(BaseModel):
     include_system_prompt: bool = True
     max_tool_result_chars: int = Field(8_000, ge=0)
     secrets: str = Field(
-        "keep",
+        "randomize",
         pattern="^(keep|randomize|redact)$",
         description=(
-            "How credentials leave the corpus. keep (default) writes the "
-            "real values, because this dataset trains a locally-hosted "
-            "model that needs them. randomize substitutes a same-length, "
-            "same-shape surrogate so the model learns what a token looks "
-            "like without learning a real one — the right choice when a "
-            "dataset leaves this machine. redact writes placeholders, which "
-            "teaches the model to emit a slug where a live token belongs."
+            "How credentials leave the corpus. randomize (default, and the "
+            "CLI's default) substitutes a same-length, same-shape surrogate "
+            "so the model learns what a token looks like without learning a "
+            "real one. keep writes the real values — deliberate only, since "
+            "a LoRA over a duplicated corpus memorizes them verbatim. redact "
+            "writes placeholders, which teaches the model to emit a slug "
+            "where a live token belongs."
         ),
     )
 
