@@ -156,6 +156,33 @@ def test_export_translates_mode_and_filters(client, auth_headers, fake_cli):
     assert "--no-system-prompt" in args
 
 
+def test_export_defaults_to_keeping_credentials(client, auth_headers, fake_cli):
+    """The corpus trains a local model that needs the real values."""
+    with _patch_run(fake_cli, {"train_examples": 1}):
+        client.post("/training/export", headers=auth_headers, json={"name": "raw"})
+    args = _args(fake_cli)
+    assert args[args.index("--secrets") + 1] == "keep"
+
+
+def test_export_forwards_the_chosen_secret_policy(client, auth_headers, fake_cli):
+    for policy in ("randomize", "redact"):
+        with _patch_run(fake_cli, {"train_examples": 1}):
+            client.post(
+                "/training/export",
+                headers=auth_headers,
+                json={"name": "shareable", "secrets": policy},
+            )
+        args = _args(fake_cli)
+        assert args[args.index("--secrets") + 1] == policy
+
+
+def test_export_rejects_an_unknown_secret_policy(client, auth_headers, fake_cli):
+    response = client.post(
+        "/training/export", headers=auth_headers, json={"secrets": "yolo"}
+    )
+    assert response.status_code == 422
+
+
 def test_export_rejects_an_unknown_mode(client, auth_headers, fake_cli):
     response = client.post(
         "/training/export", headers=auth_headers, json={"mode": "vibes"}

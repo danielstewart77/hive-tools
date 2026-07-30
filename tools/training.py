@@ -157,6 +157,19 @@ class ExportRequest(BaseModel):
     eval_fraction: float = Field(0.05, ge=0.0, lt=1.0)
     include_system_prompt: bool = True
     max_tool_result_chars: int = Field(8_000, ge=0)
+    secrets: str = Field(
+        "keep",
+        pattern="^(keep|randomize|redact)$",
+        description=(
+            "How credentials leave the corpus. keep (default) writes the "
+            "real values, because this dataset trains a locally-hosted "
+            "model that needs them. randomize substitutes a same-length, "
+            "same-shape surrogate so the model learns what a token looks "
+            "like without learning a real one — the right choice when a "
+            "dataset leaves this machine. redact writes placeholders, which "
+            "teaches the model to emit a slug where a live token belongs."
+        ),
+    )
 
 
 class TrainRequest(BaseModel):
@@ -249,6 +262,7 @@ async def training_export(
         args.append("--require-reasoning")
     if not body.include_system_prompt:
         args.append("--no-system-prompt")
+    args += ["--secrets", body.secrets]
     for harness in body.harness or []:
         args += ["--harness", harness]
     return await _run_cli_async(args, LONG_TIMEOUT_SECONDS)
