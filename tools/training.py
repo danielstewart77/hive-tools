@@ -49,6 +49,12 @@ HIVE_MIND_DIR = Path(
 )
 CLI_RELATIVE = Path("tools/stateless/training_pipeline/training_pipeline.py")
 
+# Deploy targets the Ollama on the machine that did the training, because
+# that is where the adapter files are and where the GPU that produced them
+# lives. That is this host, not the shared inference box other tools point
+# at, so it is its own setting rather than a reuse of OLLAMA_BASE_URL.
+OLLAMA_URL = os.environ.get("TRAINING_OLLAMA_URL", "http://host.docker.internal:11434")
+
 # Curation walks every row and hashes it; export renders several thousand
 # turns to JSONL. Both are minutes, not seconds, on the live corpus.
 LONG_TIMEOUT_SECONDS = 1_800
@@ -177,12 +183,60 @@ class TrainRequest(BaseModel):
     eval_file: str | None = None
     out_dir: str | None = None
     name: str = Field("hive-harness-lora", pattern=r"^[A-Za-z0-9._-]{1,64}$")
-    base_model: str | None = None
+    base_model: str | None = Field(
+        None,
+        description=(
+            "Catalog id from GET /training/base-models. Dense models train "
+            "predictably under LoRA; mixture-of-experts models train only "
+            "the experts the corpus happens to activate."
+        ),
+    )
     image: str | None = None
-    lora_rank: int = Field(32, ge=1, le=512)
+    lora_rank: int = Field(
+        32,
+        ge=1,
+        le=512,
+        description=(
+            "How much capacity the adapter has. Low values learn format and "
+            "tone; high values can learn content, and can also overfit a "
+            "few thousand turns into memorization."
+        ),
+    )
+    lora_alpha: int = Field(
+        0, ge=0, le=1024, description="Zero means twice the rank, the usual pairing."
+    )
+    lora_dropout: float = Field(0.05, ge=0.0, lt=1.0)
     learning_rate: float = Field(1e-4, gt=0, lt=1)
-    epochs: int = Field(2, ge=1, le=20)
-    max_sequence_length: int = Field(8_192, ge=512)
+    epochs: int = Field(
+        2,
+        ge=1,
+        le=20,
+        description=(
+            "Passes over the dataset. More epochs learn the style harder and "
+            "memorize the examples harder; past three, a small corpus starts "
+            "reciting rather than generalizing."
+        ),
+    )
+    batch_size: int = Field(1, ge=1, le=64)
+    gradient_accumulation_steps: int = Field(16, ge=1, le=256)
+    max_sequence_length: int = Field(
+        8_192,
+        ge=512,
+        description=(
+            "The longest turn the run can see. Costs VRAM roughly linearly, "
+            "and anything longer than this was already dropped at curation."
+        ),
+    )
+    warmup_ratio: float = Field(0.03, ge=0.0, lt=0.5)
+    load_in_4bit: bool = Field(
+        True,
+        description=(
+            "Compress the base to four bits while training so a larger model "
+            "fits. Turn off only for a model small enough to hold in bf16 — "
+            "faster and slightly more faithful when it fits."
+        ),
+    )
+    seed: int = Field(17, ge=0)
     dry_run: bool = Field(
         True,
         description=(
@@ -190,6 +244,30 @@ class TrainRequest(BaseModel):
             "is an explicit act rather than the fallthrough."
         ),
     )
+
+
+class DeployRequest(BaseModel):
+    name: str = Field(..., pattern=r"^[A-Za-z0-9._:-]{1,64}$")
+    adapter_dir: str
+    base_model: str | None = None
+    serve_tag: str | None = None
+    strategy: str = Field(
+        "adapter",
+        pattern="^(adapter|merge)$",
+        description=(
+            "adapter stacks the LoRA on a base tag Ollama already holds — "
+            "seconds, and a few hundred megabytes, at the cost of a mismatch "
+            "between the full-precision weights the adapter was fitted "
+            "against and the quantized copy being served. merge folds the "
+            "adapter into the weights and converts the result, which removes "
+            "the mismatch and costs a conversion pass and a full model of "
+            "disk per deploy."
+        ),
+    )
+    quantization: str = Field("q4_K_M", pattern=r"^[A-Za-z0-9_]{2,12}$")
+    temperature: float = Field(0.2, ge=0.0, le=2.0)
+    num_ctx: int = Field(32_768, ge=512)
+    system_prompt: str = ""
 
 
 @router.get("/status", dependencies=[Depends(require_api_token)])
@@ -283,13 +361,27 @@ async def training_train(
         body.name,
         "--lora-rank",
         str(body.lora_rank),
+        "--lora-dropout",
+        str(body.lora_dropout),
         "--learning-rate",
         str(body.learning_rate),
         "--epochs",
         str(body.epochs),
+        "--batch-size",
+        str(body.batch_size),
+        "--gradient-accumulation-steps",
+        str(body.gradient_accumulation_steps),
         "--max-sequence-length",
         str(body.max_sequence_length),
+        "--warmup-ratio",
+        str(body.warmup_ratio),
+        "--seed",
+        str(body.seed),
     ]
+    if body.lora_alpha:
+        args += ["--lora-alpha", str(body.lora_alpha)]
+    if not body.load_in_4bit:
+        args.append("--no-4bit")
     if body.eval_file:
         args += ["--eval-file", body.eval_file]
     if body.out_dir:
@@ -301,3 +393,47 @@ async def training_train(
     if body.dry_run:
         args.append("--dry-run")
     return await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+
+
+@router.get("/base-models", dependencies=[Depends(require_api_token)])
+async def training_base_models() -> dict[str, Any]:
+    """Candidate bases, annotated with what this host can train and serve."""
+    args = ["base-models"]
+    if OLLAMA_URL:
+        args += ["--ollama-url", OLLAMA_URL]
+    return await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+
+
+@router.post("/deploy")
+async def training_deploy(
+    body: DeployRequest,
+    caller: str = Depends(hitl_gate("training_deploy")),
+) -> dict[str, Any]:
+    """Serve a trained adapter, or start the merge that will let us."""
+    del caller
+    args = [
+        "deploy",
+        "--name",
+        body.name,
+        "--adapter-dir",
+        body.adapter_dir,
+        "--strategy",
+        body.strategy,
+        "--quantization",
+        body.quantization,
+        "--temperature",
+        str(body.temperature),
+        "--num-ctx",
+        str(body.num_ctx),
+    ]
+    if body.base_model:
+        args += ["--base-model", body.base_model]
+    if body.serve_tag:
+        args += ["--serve-tag", body.serve_tag]
+    if body.system_prompt:
+        args += ["--system-prompt", body.system_prompt]
+    if OLLAMA_URL:
+        args += ["--ollama-url", OLLAMA_URL]
+    # A merge launches a container and returns; an adapter deploy uploads a
+    # few hundred megabytes and waits on Ollama. Neither is a quick call.
+    return await _run_cli_async(args, LONG_TIMEOUT_SECONDS)

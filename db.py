@@ -135,6 +135,7 @@ _DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
     ("training_curate", "off", 15),
     ("training_export", "off", 15),
     ("training_train", "off", 15),
+    ("training_deploy", "off", 15),
 ]
 
 

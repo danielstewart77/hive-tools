@@ -40,14 +40,19 @@ def auth_headers(app: FastAPI) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def hitl_off(app: FastAPI):
-    """Run the gated endpoints directly.
+    """Pin the gate open regardless of what the seed defaults happen to be.
 
-    Curate, export and train are HITL-gated in production — each fires a
-    Telegram approval on first call and returns 202. That behaviour is the
-    HITL suite's to test; here it would mask the argument translation these
-    tests exist to pin.
+    Production seeds these off, since the console's login is already the
+    human in the loop. Asserting it here would only restate the seed test;
+    what matters is that a changed default never silently turns these tests
+    into assertions about a 202 approval envelope.
     """
-    for tool in ("training_curate", "training_export", "training_train"):
+    for tool in (
+        "training_curate",
+        "training_export",
+        "training_train",
+        "training_deploy",
+    ):
         app.state.db.execute(
             "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
             (tool, "off"),
@@ -280,3 +285,151 @@ def test_every_endpoint_requires_a_token(client):
         client.post("/training/train", json={"train_file": "/x"}).status_code
         in (401, 403)
     )
+
+
+def test_base_models_reaches_the_catalog_subcommand(client, auth_headers, fake_cli):
+    payload = {"default": "Qwen/Qwen3-8B", "models": [{"id": "Qwen/Qwen3-8B"}]}
+    with _patch_run(fake_cli, payload):
+        response = client.get("/training/base-models", headers=auth_headers)
+    assert response.status_code == 200
+    assert response.json() == payload
+    args = _args(fake_cli)
+    assert args[0] == "base-models"
+    assert "--ollama-url" in args
+
+
+def test_base_models_requires_a_token(client, fake_cli):
+    assert client.get("/training/base-models").status_code == 401
+
+
+def test_train_translates_the_full_knob_set(client, auth_headers, fake_cli):
+    with _patch_run(fake_cli, {"can_run": True}):
+        response = client.post(
+            "/training/train",
+            headers=auth_headers,
+            json={
+                "train_file": "/data/v1/train.jsonl",
+                "base_model": "Qwen/Qwen3-14B",
+                "lora_rank": 16,
+                "lora_alpha": 128,
+                "lora_dropout": 0.1,
+                "epochs": 3,
+                "batch_size": 2,
+                "gradient_accumulation_steps": 8,
+                "max_sequence_length": 4096,
+                "warmup_ratio": 0.1,
+                "load_in_4bit": False,
+                "seed": 5,
+            },
+        )
+    assert response.status_code == 200
+    args = _args(fake_cli)
+    assert args[args.index("--base-model") + 1] == "Qwen/Qwen3-14B"
+    assert args[args.index("--lora-rank") + 1] == "16"
+    assert args[args.index("--lora-alpha") + 1] == "128"
+    assert args[args.index("--lora-dropout") + 1] == "0.1"
+    assert args[args.index("--epochs") + 1] == "3"
+    assert args[args.index("--batch-size") + 1] == "2"
+    assert args[args.index("--gradient-accumulation-steps") + 1] == "8"
+    assert args[args.index("--max-sequence-length") + 1] == "4096"
+    assert args[args.index("--warmup-ratio") + 1] == "0.1"
+    assert args[args.index("--seed") + 1] == "5"
+    assert "--no-4bit" in args
+
+
+def test_four_bit_loading_is_the_default_and_passes_no_flag(
+    client, auth_headers, fake_cli
+):
+    with _patch_run(fake_cli, {"can_run": True}):
+        client.post(
+            "/training/train",
+            headers=auth_headers,
+            json={"train_file": "/data/v1/train.jsonl"},
+        )
+    assert "--no-4bit" not in _args(fake_cli)
+
+
+def test_an_unset_lora_alpha_is_left_to_the_cli(client, auth_headers, fake_cli):
+    """The CLI derives it from the rank; sending 0 would override with junk."""
+    with _patch_run(fake_cli, {"can_run": True}):
+        client.post(
+            "/training/train",
+            headers=auth_headers,
+            json={"train_file": "/data/v1/train.jsonl"},
+        )
+    assert "--lora-alpha" not in _args(fake_cli)
+
+
+def test_deploy_translates_the_request(client, auth_headers, fake_cli):
+    with _patch_run(fake_cli, {"deployed": True, "stage": "served"}):
+        response = client.post(
+            "/training/deploy",
+            headers=auth_headers,
+            json={
+                "name": "skippy-lora",
+                "adapter_dir": "/data/v1/adapter",
+                "base_model": "Qwen/Qwen3-8B",
+                "strategy": "merge",
+                "quantization": "q5_K_M",
+                "num_ctx": 16384,
+            },
+        )
+    assert response.status_code == 200
+    args = _args(fake_cli)
+    assert args[0] == "deploy"
+    assert args[args.index("--name") + 1] == "skippy-lora"
+    assert args[args.index("--adapter-dir") + 1] == "/data/v1/adapter"
+    assert args[args.index("--strategy") + 1] == "merge"
+    assert args[args.index("--quantization") + 1] == "q5_K_M"
+    assert args[args.index("--num-ctx") + 1] == "16384"
+
+
+def test_deploy_defaults_to_the_adapter_strategy(client, auth_headers, fake_cli):
+    """The cheap, reversible one. Merging costs an hour and 20 GB."""
+    with _patch_run(fake_cli, {"deployed": True}):
+        client.post(
+            "/training/deploy",
+            headers=auth_headers,
+            json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
+        )
+    args = _args(fake_cli)
+    assert args[args.index("--strategy") + 1] == "adapter"
+
+
+def test_deploy_rejects_an_unknown_strategy(client, auth_headers, fake_cli):
+    response = client.post(
+        "/training/deploy",
+        headers=auth_headers,
+        json={
+            "name": "skippy-lora",
+            "adapter_dir": "/data/v1/adapter",
+            "strategy": "wing-it",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_deploy_rejects_a_model_name_ollama_would_choke_on(
+    client, auth_headers, fake_cli
+):
+    response = client.post(
+        "/training/deploy",
+        headers=auth_headers,
+        json={"name": "skippy lora; rm -rf /", "adapter_dir": "/data/v1/adapter"},
+    )
+    assert response.status_code == 422
+
+
+def test_deploy_passes_a_refusal_through_rather_than_erroring(
+    client, auth_headers, fake_cli
+):
+    """A refused deploy is an outcome the console renders, not a 500."""
+    payload = {"deployed": False, "stage": "refused", "blockers": ["no adapter weights"]}
+    with _patch_run(fake_cli, payload):
+        response = client.post(
+            "/training/deploy",
+            headers=auth_headers,
+            json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
+        )
+    assert response.status_code == 200
+    assert response.json() == payload
