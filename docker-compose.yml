@@ -27,6 +27,11 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=utility
+      # Handed to docker run when a fine-tune launches, so it has to be the
+      # path as the host sees it. Left unset, this container would derive
+      # one from its own home directory, Docker would create that on the
+      # host, and every run would re-download the base model.
+      - HF_HOME=${HF_HOME:-/home/daniel/.cache/huggingface}
     # Deploy pushes a trained adapter to the Ollama on the machine that
     # trained it — this host — which is a different endpoint from the shared
     # inference box the ollama tool calls.
