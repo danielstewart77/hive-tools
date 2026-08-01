@@ -30,10 +30,3 @@ def test_health_endpoint_returns_200(client: TestClient) -> None:
 def test_app_initializes_db_on_startup(app: FastAPI) -> None:
     assert hasattr(app.state, "db")
     assert app.state.db is not None
-
-
-def test_openapi_schema_available(client: TestClient) -> None:
-    resp = client.get("/openapi.json")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "paths" in data

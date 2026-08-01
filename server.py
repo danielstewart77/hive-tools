@@ -37,7 +37,7 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 def create_app(db_path: str | None = None) -> FastAPI:
     """Application factory."""
-    app = FastAPI(title="HiveTools", version="0.1.0")
+    app = FastAPI(title="HiveTools", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
     install_fastapi_logging(app, log, "hive-tools")
 
     # Initialize database
