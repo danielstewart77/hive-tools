@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ollama", tags=["ollama"])
 
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://192.168.4.64:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_DEFAULT_MODEL = os.environ.get("OLLAMA_DEFAULT_MODEL", "gpt-oss:20b-32k")
 OLLAMA_TIMEOUT_SECONDS = 90
 

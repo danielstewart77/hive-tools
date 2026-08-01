@@ -31,7 +31,7 @@ def auth_header(app: FastAPI) -> dict[str, str]:
 
 
 def _gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SMS_GATEWAY_URL", "http://10.7.0.5:8080")
+    monkeypatch.setenv("SMS_GATEWAY_URL", "http://sms-gateway.test:8080")
     monkeypatch.setenv("SMS_GATEWAY_USER", "user")
     monkeypatch.setenv("SMS_GATEWAY_PASS", "pass")
 
@@ -123,7 +123,7 @@ def test_send_posts_to_gateway_and_returns_payload(
     assert data["gateway"]["id"] == "gw-123"
 
     args, kwargs = mock_client.post.call_args
-    assert args[0].endswith("/message")
+    assert args[0].endswith("/api/3rdparty/v1/messages")
     assert kwargs["json"] == {"message": "hello there", "phoneNumbers": ["+15551234567"]}
     assert kwargs["auth"] == ("user", "pass")
 

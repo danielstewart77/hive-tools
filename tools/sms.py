@@ -1,16 +1,18 @@
-"""SMS send via sms-gate.app local REST API on Daniel's Android phone.
+"""SMS send via self-hosted sms-gateway server (capcom6/sms-gateway).
 
-Outbound counterpart to hive-comms' `/sms/inbound` webhook receiver. Calls
-the phone's local-server endpoint over LAN/WireGuard; HITL-gated by default
-so a Telegram approval fires before anything leaves the phone.
+Outbound counterpart to hive-comms' `/sms/inbound` webhook receiver. Posts to
+the local sms-gateway container's 3rd-party API; the server dispatches the
+job to the phone app via its outbound channel. HITL-gated by default so a
+Telegram approval fires before anything leaves the home.
 
 Also exposes a thin proxy over hive-comms' `/sms/inbound/enabled` toggle
 so the inbound listener can be flipped on/off from the Hive Tools surface.
 
 Env vars:
-- ``SMS_GATEWAY_URL`` — base URL for the phone, e.g. ``http://10.7.0.5:8080``.
-- ``SMS_GATEWAY_USER`` / ``SMS_GATEWAY_PASS`` — basic-auth credentials from
-  the sms-gate.app home screen.
+- ``SMS_GATEWAY_URL`` — base URL for the local sms-gateway container, e.g.
+  ``http://sms-gateway:3000`` (reached over the ``sms-private`` Docker network).
+- ``SMS_GATEWAY_USER`` / ``SMS_GATEWAY_PASS`` — basic-auth credentials issued
+  by the server when the phone registers as a device.
 - ``COMMS_URL`` / ``COMMS_BEARER_TOKEN`` — used by the inbound-toggle proxy.
 """
 from __future__ import annotations
@@ -46,7 +48,7 @@ async def send_sms(
     body: SmsSendRequest,
     caller: str = Depends(hitl_gate("sms_send")),
 ) -> Any:
-    """Send an SMS via the phone's sms-gate.app local server.
+    """Send an SMS via the self-hosted sms-gateway server.
 
     HITL-gated — the first call fires a Telegram approval prompt; on
     approve the same request replays through and reaches this handler.
@@ -61,7 +63,7 @@ async def send_sms(
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SECONDS) as client:
             resp = await client.post(
-                f"{base_url}/message",
+                f"{base_url}/api/3rdparty/v1/messages",
                 json=payload,
                 auth=auth,
             )

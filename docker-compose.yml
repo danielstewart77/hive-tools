@@ -9,13 +9,13 @@ services:
       - ./credentials:/app/credentials:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
-      - /home/daniel/Storage/Dev:/home/daniel/Storage/Dev:ro
+      - ${HOST_DEV_DIR:?set HOST_DEV_DIR in .env}:${HOST_DEV_DIR}:ro
       # The training pipeline writes curation verdicts back onto
       # training_turns.db, appends to the run ledger, and drops exported
       # JSONL beside them. Same host path as the read-only mount above,
       # re-mounted read-write and scoped to that one directory so the
       # blast radius of "hive-tools can write into hive_mind" stays legible.
-      - ${HIVE_MIND_DIR:-/home/daniel/Storage/Dev/hive_mind}/data:/home/daniel/Storage/Dev/hive_mind/data:rw
+      - ${HIVE_MIND_DIR:?set HIVE_MIND_DIR in .env}/data:${HIVE_MIND_DIR}/data:rw
     # The fine-tune planner decides whether a run can start by asking
     # nvidia-smi how much VRAM is free. Without the nvidia runtime that
     # binary does not exist in here, every plan comes back "no GPU visible",
@@ -31,7 +31,7 @@ services:
       # path as the host sees it. Left unset, this container would derive
       # one from its own home directory, Docker would create that on the
       # host, and every run would re-download the base model.
-      - HF_HOME=${HF_HOME:-/home/daniel/.cache/huggingface}
+      - HF_HOME=${HF_HOME:?set HF_HOME in .env}
     # Deploy pushes a trained adapter to the Ollama on the machine that
     # trained it — this host — which is a different endpoint from the shared
     # inference box the ollama tool calls.

@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["training"])
 
 HIVE_MIND_DIR = Path(
-    os.environ.get("HIVE_MIND_DIR", "/home/daniel/Storage/Dev/hive_mind")
+    os.environ.get("HIVE_MIND_DIR", str(Path.home() / "hive_mind"))
 )
 CLI_RELATIVE = Path("tools/stateless/training_pipeline/training_pipeline.py")
 
