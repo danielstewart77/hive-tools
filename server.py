@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncio
@@ -37,7 +38,33 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 def create_app(db_path: str | None = None) -> FastAPI:
     """Application factory."""
-    app = FastAPI(title="HiveTools", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        """Pick up a training run this process was watching when it died.
+
+        The watcher holding the restore obligation lives in this process's
+        event loop, so a redeploy mid-run would otherwise leave the voice
+        stack stopped and Ollama evicted with nobody left to put them
+        back. The journal on disk is what survives; this reads it.
+        """
+        try:
+            from tools import training_gpu
+
+            outcome = await training_gpu.reconcile(notify=training_gpu.notify_owner)
+            if outcome.get("action") != "nothing-to-do":
+                log.info("training.gpu.reconcile outcome=%s", outcome)
+        except Exception as exc:  # noqa: BLE001 - startup must not be fatal
+            log.warning("training.gpu.reconcile_failed error=%s", exc)
+        yield
+
+    app = FastAPI(
+        title="HiveTools",
+        version="0.1.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=lifespan,
+    )
     install_fastapi_logging(app, log, "hive-tools")
 
     # Initialize database

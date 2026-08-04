@@ -39,13 +39,19 @@ from pydantic import BaseModel, Field
 
 from auth_api import require_api_token
 from hitl import hitl_gate
+from tools import training_gpu
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/training", tags=["training"])
 
+# The repo is bind-mounted at its host path so that paths handed to the
+# Docker daemon resolve identically inside and out. Defaulting to this
+# process's home directory instead — as this once did — means a rebuild
+# from source produces a container where every training route answers 503,
+# while the running one works.
 HIVE_MIND_DIR = Path(
-    os.environ.get("HIVE_MIND_DIR", str(Path.home() / "hive_mind"))
+    os.environ.get("HIVE_MIND_DIR", "/home/daniel/Storage/Dev/hive_mind")
 )
 CLI_RELATIVE = Path("tools/stateless/training_pipeline/training_pipeline.py")
 
@@ -392,7 +398,55 @@ async def training_train(
         args += ["--image", body.image]
     if body.dry_run:
         args.append("--dry-run")
-    return await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+        return await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+
+    return await launch_with_gpu(body.name, args)
+
+
+async def launch_with_gpu(output_name: str, args: list[str]) -> dict[str, Any]:
+    """Take the card, launch, and arm the watcher that gives it back.
+
+    Every real launch goes through here — the console button and an agent
+    calling the same route are the same code path, so neither can acquire
+    the GPU by a route that forgets to release it.
+    """
+    in_flight = training_gpu.run_in_flight()
+    if in_flight:
+        # One card, one trainer. Two runs would each preflight over the
+        # other's record and the first to finish would restore the voice
+        # stack on top of the second.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"a training run is already in flight: {in_flight.get('output_name')} "
+                f"(started {in_flight.get('started_at')})"
+            ),
+        )
+
+    entry = await training_gpu.preflight(output_name)
+    try:
+        result = await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+    except Exception:
+        # Includes the CLI timing out. Nothing is training, so the card
+        # goes straight back rather than staying dark until someone
+        # notices the machine has stopped talking.
+        await training_gpu.restore(entry)
+        raise
+
+    if not result.get("launched"):
+        await training_gpu.restore(entry)
+        return result
+
+    entry["run_id"] = result.get("run_id", "")
+    training_gpu.write_journal(entry)
+    asyncio.ensure_future(training_gpu.watch(entry, notify=training_gpu.notify_owner))
+    # The watcher announces the end. Nothing announced the start, so the
+    # first anyone knew of the card being taken was the voice going silent.
+    await training_gpu.safe_notify(
+        training_gpu.notify_owner,
+        f"training run {output_name} started; voice is down until it ends",
+    )
+    return result
 
 
 @router.get("/base-models", dependencies=[Depends(require_api_token)])
@@ -411,6 +465,19 @@ async def training_deploy(
 ) -> dict[str, Any]:
     """Serve a trained adapter, or start the merge that will let us."""
     del caller
+    in_flight = training_gpu.run_in_flight()
+    if in_flight:
+        # Both strategies reach for the card — a merge launches a GPU
+        # container, an adapter upload makes Ollama load the base — so
+        # deploying last week's adapter mid-run collides with this week's.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "a training run is in flight "
+                f"({in_flight.get('output_name')}); deploying would take VRAM "
+                "from it"
+            ),
+        )
     args = [
         "deploy",
         "--name",
