@@ -433,3 +433,170 @@ def test_deploy_passes_a_refusal_through_rather_than_erroring(
         )
     assert response.status_code == 200
     assert response.json() == payload
+
+
+# ----------------------------------------------- GPU arbitration at the route
+
+
+@pytest.fixture()
+def arbitration(tmp_path, monkeypatch):
+    """Replace the card, the daemon and Telegram with observable stand-ins."""
+    from tools import training_gpu
+
+    journal = tmp_path / "gpu_arbitration.json"
+    monkeypatch.setattr(training_gpu, "JOURNAL_PATH", journal)
+    state = {
+        "preflighted": [],
+        "restored": [],
+        "watched": [],
+        "notified": [],
+        "in_flight": None,
+    }
+
+    async def fake_preflight(output_name, run_id="", containers=None, path=None):
+        state["preflighted"].append(output_name)
+        entry = {"output_name": output_name, "restore": ["hive-mind-voice"]}
+        training_gpu.write_journal(entry, journal)
+        return entry
+
+    async def fake_restore(entry, path=None):
+        state["restored"].append(entry["output_name"])
+        training_gpu.clear_journal(journal)
+        return {"started": entry.get("restore", []), "failures": []}
+
+    async def fake_watch(entry, notify=None, poll_seconds=None, path=None):
+        state["watched"].append(entry["output_name"])
+        return {"outcome": "succeeded"}
+
+    async def fake_notify(message):
+        state["notified"].append(message)
+        return True
+
+    monkeypatch.setattr(training_gpu, "preflight", fake_preflight)
+    monkeypatch.setattr(training_gpu, "restore", fake_restore)
+    monkeypatch.setattr(training_gpu, "watch", fake_watch)
+    monkeypatch.setattr(training_gpu, "notify_owner", fake_notify)
+    monkeypatch.setattr(training_gpu, "run_in_flight", lambda path=None: state["in_flight"])
+    return state
+
+
+def _train_body(**kwargs):
+    body = {"train_file": "/data/v1/train.jsonl", "name": "run-a", "dry_run": False}
+    body.update(kwargs)
+    return body
+
+
+def test_launching_frees_the_card_and_arms_the_watcher(
+    client, auth_headers, fake_cli, arbitration
+):
+    """Requirement 1 and 9 at the seam that actually runs in production."""
+    with _patch_run(fake_cli, {"launched": True, "run_id": "r1"}):
+        response = client.post("/training/train", json=_train_body(), headers=auth_headers)
+
+    assert response.status_code == 200
+    assert arbitration["preflighted"] == ["run-a"]
+    assert arbitration["watched"] == ["run-a"]
+    assert arbitration["restored"] == []
+    assert any("voice is down" in m for m in arbitration["notified"])
+
+
+def test_a_refused_launch_gives_the_card_straight_back(
+    client, auth_headers, fake_cli, arbitration
+):
+    """Requirement 2: nothing is training, so nothing should stay down."""
+    with _patch_run(fake_cli, {"launched": False, "plan": {"blockers": ["GPU busy"]}}):
+        response = client.post("/training/train", json=_train_body(), headers=auth_headers)
+
+    assert response.status_code == 200
+    assert arbitration["restored"] == ["run-a"]
+    assert arbitration["watched"] == []
+
+
+def test_a_launch_that_errors_gives_the_card_straight_back(
+    client, auth_headers, fake_cli, arbitration
+):
+    """The path that used to leave the machine mute: docker or the CLI dying."""
+    with _patch_run(fake_cli, {"detail": "boom"}, returncode=1):
+        response = client.post("/training/train", json=_train_body(), headers=auth_headers)
+
+    assert response.status_code == 500
+    assert arbitration["restored"] == ["run-a"]
+
+
+def test_a_dry_run_never_touches_the_card(client, auth_headers, fake_cli, arbitration):
+    """Requirement 7's sibling: planning is not launching."""
+    with _patch_run(fake_cli, {"can_run": True, "blockers": []}):
+        response = client.post(
+            "/training/train", json=_train_body(dry_run=True), headers=auth_headers
+        )
+
+    assert response.status_code == 200
+    assert arbitration["preflighted"] == []
+
+
+def test_curate_and_export_never_touch_the_card(
+    client, auth_headers, fake_cli, arbitration
+):
+    """Requirement 7, driven through the routes rather than the functions.
+
+    Called at this level because the regression it guards against is
+    someone hoisting preflight into the shared CLI wrapper, which a test
+    calling the curate handler directly would not see.
+    """
+    with _patch_run(fake_cli, {"kept": 10}):
+        client.post("/training/curate", json={}, headers=auth_headers)
+    with _patch_run(fake_cli, {"written": 10}):
+        client.post("/training/export", json={}, headers=auth_headers)
+
+    assert arbitration["preflighted"] == []
+    assert arbitration["restored"] == []
+
+
+def test_a_second_launch_is_refused_while_one_is_in_flight(
+    client, auth_headers, fake_cli, arbitration
+):
+    """Requirement 11: one card, one trainer."""
+    arbitration["in_flight"] = {"output_name": "run-a", "started_at": 1}
+
+    with _patch_run(fake_cli, {"launched": True, "run_id": "r2"}):
+        response = client.post(
+            "/training/train", json=_train_body(name="run-b"), headers=auth_headers
+        )
+
+    assert response.status_code == 409
+    assert arbitration["preflighted"] == []
+
+
+def test_deploying_during_a_run_is_refused(client, auth_headers, fake_cli, arbitration):
+    """A merge launches a GPU container; an adapter upload wakes Ollama."""
+    arbitration["in_flight"] = {"output_name": "run-a", "started_at": 1}
+
+    with _patch_run(fake_cli, {"deployed": True}):
+        response = client.post(
+            "/training/deploy",
+            json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 409
+
+
+def test_both_triggers_take_the_same_guarded_path(
+    client, auth_headers, fake_cli, arbitration
+):
+    """Requirement 8, asserted as behaviour rather than symbol identity.
+
+    An agent posting to this route and the console button pressing it are
+    the same request; what matters is that neither can reach the launcher
+    without acquiring and releasing the card, so the in-flight guard is
+    asserted to bite regardless of who is calling.
+    """
+    arbitration["in_flight"] = {"output_name": "run-a", "started_at": 1}
+    with _patch_run(fake_cli, {"launched": True}):
+        agent_call = client.post(
+            "/training/train", json=_train_body(name="agent-run"), headers=auth_headers
+        )
+        console_call = client.post(
+            "/training/train", json=_train_body(name="console-run"), headers=auth_headers
+        )
+    assert agent_call.status_code == console_call.status_code == 409
