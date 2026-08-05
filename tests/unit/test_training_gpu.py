@@ -473,3 +473,39 @@ def test_a_download_in_progress_is_visible_rather_than_blank(monkeypatch):
     assert lines[0].endswith("reading the job spec")
     assert any("12%" in line for line in lines)
     assert any("38%" in line for line in lines)
+
+
+def test_a_live_run_reports_a_heartbeat_and_a_dead_one_does_not(monkeypatch):
+    """Requirement: the pane proves the run is alive between log lines.
+
+    Identical text for a minute is indistinguishable from a poller that
+    has died, so liveness has to be its own signal rather than inferred
+    from output arriving.
+    """
+    states = {"running": "true 2026-08-05T02:48:28.123456789Z"}
+
+    def fake_docker(args, timeout=None):
+        assert args[0] == "inspect"
+        if args[-1] == "hive-trainer-run-a":
+            return _Completed(0, states["running"] + "\n", "")
+        return _Completed(1, "", "Error: No such object")
+
+    def fake_smi(args, capture_output=None, text=None, timeout=None):
+        return _Completed(0, "43950, 98\n", "")
+
+    monkeypatch.setattr(gpu, "_docker", fake_docker)
+    monkeypatch.setattr(gpu.subprocess, "run", fake_smi)
+
+    live = gpu.heartbeat("run-a")
+    assert live["live"] is True
+    assert live["vram_mib"] == 43_950
+    assert live["gpu_util_pct"] == 98
+    assert live["uptime_seconds"] > 0
+
+    states["running"] = "false 2026-08-05T02:48:28.123456789Z"
+    stopped = gpu.heartbeat("run-a")
+    assert stopped["live"] is False
+    # Nothing is claimed about the card once the trainer is not on it.
+    assert stopped["vram_mib"] == 0
+
+    assert gpu.heartbeat("run-b")["live"] is False

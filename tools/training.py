@@ -306,7 +306,13 @@ async def training_logs(name: str, tail: int = training_gpu.LOG_TAIL_LINES) -> d
         archived = training_gpu.archived_logs(name.strip(), tail=limit)
         if archived.get("available"):
             result = archived
-    return {"name": name.strip(), **result}
+    # A trainer can go a minute between lines, and identical text for a
+    # minute looks exactly like a poller that has died.
+    return {
+        "name": name.strip(),
+        **result,
+        "heartbeat": training_gpu.heartbeat(name.strip()),
+    }
 
 
 @router.post("/kill", dependencies=[Depends(require_api_token)])
