@@ -204,8 +204,21 @@ def trainer_logs(output_name: str, tail: int = LOG_TAIL_LINES) -> dict[str, Any]
     return {
         "available": True,
         "reason": "",
-        "lines": [line for line in merged.splitlines() if line.strip()],
+        "lines": _as_lines(merged),
     }
+
+
+def _as_lines(text: str) -> list[str]:
+    """Split output into lines a reader can see, carriage returns included.
+
+    A progress bar redraws itself with ``\\r`` and emits no newline until
+    it completes, so a naive line split leaves a downloading run looking
+    like a run producing nothing at all. Each redraw becomes its own
+    line here — noisier than a terminal would render it, and the noise is
+    the point: it is the difference between visible progress and a blank
+    pane.
+    """
+    return [line for line in text.replace("\r", "\n").splitlines() if line.strip()]
 
 
 def archive_trainer_logs(output_name: str, run_id: str = "") -> str:
