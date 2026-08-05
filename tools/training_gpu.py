@@ -85,6 +85,19 @@ DOCKER_TIMEOUT = 90
 #: How much of a trainer's output a log poll returns by default.
 LOG_TAIL_LINES = int(os.environ.get("TRAINING_LOG_TAIL_LINES", "200"))
 
+#: Where a finished run's output is kept once its container is dropped.
+LOG_ARCHIVE_DIR = Path(
+    os.environ.get(
+        "TRAINING_LOG_ARCHIVE_DIR",
+        "/home/daniel/Storage/Dev/hive_mind/data/training_logs",
+    )
+)
+MAX_ARCHIVED_LOG_LINES = int(os.environ.get("TRAINING_LOG_ARCHIVE_LINES", "20000"))
+
+#: How long a stopped trainer is given to exit before it is killed. Long
+#: enough for torch to release the card, short enough to be a button.
+STOP_GRACE_SECONDS = int(os.environ.get("TRAINING_STOP_GRACE_SECONDS", "30"))
+
 STATE_RUNNING = "running"
 STATE_STOPPED = "stopped"
 STATE_MISSING = "missing"
@@ -193,6 +206,96 @@ def trainer_logs(output_name: str, tail: int = LOG_TAIL_LINES) -> dict[str, Any]
         "reason": "",
         "lines": [line for line in merged.splitlines() if line.strip()],
     }
+
+
+def archive_trainer_logs(output_name: str, run_id: str = "") -> str:
+    """Keep a run's output after its container is gone.
+
+    ``docker logs`` is the only copy, and dropping the container drops it.
+    A run whose ending needs explaining is precisely the run whose logs
+    have just been deleted, so they are written to disk first. Failure to
+    archive is logged and never raised: nothing about reporting an
+    outcome should depend on a disk write succeeding.
+    """
+    result = trainer_logs(output_name, tail=MAX_ARCHIVED_LOG_LINES)
+    if not result.get("available") or not result.get("lines"):
+        return ""
+    stamp = run_id or str(int(time.time()))
+    target = LOG_ARCHIVE_DIR / f"{output_name}.{stamp}.log"
+    try:
+        LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(result["lines"]) + "\n")
+    except OSError as exc:
+        log.warning("training.gpu.log_archive_failed name=%s error=%s", output_name, exc)
+        return ""
+    return str(target)
+
+
+def archived_logs(output_name: str, tail: int = LOG_TAIL_LINES) -> dict[str, Any]:
+    """The newest archived copy of a run's output, if there is one."""
+    try:
+        candidates = sorted(LOG_ARCHIVE_DIR.glob(f"{output_name}.*.log"))
+    except OSError:
+        return {"available": False, "reason": "no archived logs", "lines": []}
+    if not candidates:
+        return {"available": False, "reason": "no archived logs", "lines": []}
+    try:
+        lines = candidates[-1].read_text().splitlines()
+    except OSError as exc:
+        return {"available": False, "reason": str(exc)[:200], "lines": []}
+    return {
+        "available": True,
+        "reason": "",
+        "archived": True,
+        "lines": lines[-max(1, tail) :],
+    }
+
+
+def stop_trainer(output_name: str, timeout_seconds: int = STOP_GRACE_SECONDS) -> dict[str, Any]:
+    """Stop a running trainer. Says what it found rather than assuming.
+
+    Stopping something that is not running is reported, not raised: the
+    console offers the button whenever a run looks live, and a run that
+    ended between the render and the click is the ordinary case rather
+    than an error worth showing anyone.
+    """
+    try:
+        status = trainer_status(output_name)
+    except DockerUnreachable as exc:
+        return {"stopped": False, "reason": f"docker unreachable: {str(exc)[:160]}"}
+    if status["state"] != STATE_RUNNING:
+        return {"stopped": False, "reason": "no run in flight"}
+    try:
+        completed = _docker(
+            ["stop", "--time", str(max(1, timeout_seconds)), trainer_container(output_name)],
+            timeout=max(DOCKER_TIMEOUT, timeout_seconds + 30),
+        )
+    except DockerUnreachable as exc:
+        return {"stopped": False, "reason": f"docker unreachable: {str(exc)[:160]}"}
+    if completed.returncode != 0:
+        # A trainer holding the GPU can leave its main process unreapable
+        # for longer than the daemon's patience, and docker reports that
+        # as a failure to stop even though the signals landed. The watcher
+        # settles who is right — it is reading the container's real state.
+        log.warning(
+            "training.gpu.stop_reported_failure name=%s error=%s",
+            output_name,
+            (completed.stderr or "").strip()[:200],
+        )
+        return {"stopped": True, "reason": (completed.stderr or "").strip()[:200]}
+    return {"stopped": True, "reason": ""}
+
+
+async def safe_close_run(close_run, run_id: str, outcome: str, exit_code: int | None) -> None:
+    """Write the outcome to the ledger. Never take the restore down with it."""
+    if not run_id:
+        return
+    try:
+        result = close_run(run_id, outcome, exit_code)
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:  # noqa: BLE001 - the ledger is across a process boundary
+        log.warning("training.gpu.close_run_failed run_id=%s error=%s", run_id, exc)
 
 
 def container_vram_mib(names: list[str] | None = None) -> int:
@@ -509,6 +612,7 @@ async def watch(
     notify=None,
     poll_seconds: float = POLL_SECONDS,
     path: Path | None = None,
+    close_run=None,
 ) -> dict[str, Any]:
     """Wait for the trainer to end, then restore and report how it ended."""
     output_name = entry.get("output_name", "")
@@ -530,12 +634,28 @@ async def watch(
         break
 
     if exit_code is not None:
+        # Before the container goes, not after: removing it destroys the
+        # only copy of what the run was doing, and a run whose end needs
+        # explaining is exactly the one whose logs have been deleted.
+        archive_trainer_logs(output_name, entry.get("run_id", ""))
         remove_trainer(output_name)
+    # The kill marks the journal, not this entry: the watcher was armed at
+    # launch and is holding the dict as it was then, minutes before anyone
+    # decided to stop the run.
+    journal = read_journal(path) or {}
+    cancelled = bool(entry.get("cancelled") or journal.get("cancelled"))
     outcome = "succeeded" if exit_code == 0 else "failed"
+    if cancelled:
+        # An operator stopping a run is not the run breaking. The exit
+        # code is 137 either way, so the intent has to be recorded when
+        # it is formed rather than inferred from the corpse.
+        outcome = "cancelled"
     if exit_code is None:
         # Container vanished before anyone read it — someone removed it by
         # hand, or an older launch used --rm. Say so rather than guessing.
         outcome = "ended, outcome unknown"
+    if close_run is not None:
+        await safe_close_run(close_run, entry.get("run_id", ""), outcome, exit_code)
     result = await restore(entry, path)
     if notify is not None:
         await safe_notify(
@@ -587,7 +707,7 @@ async def notify_owner(message: str) -> bool:
     return True
 
 
-async def reconcile(notify=None, path: Path | None = None) -> dict[str, Any]:
+async def reconcile(notify=None, path: Path | None = None, close_run=None) -> dict[str, Any]:
     """Pick the watch back up after this process restarted.
 
     A journal is only ever present between a preflight and its restore, so
@@ -602,10 +722,10 @@ async def reconcile(notify=None, path: Path | None = None) -> dict[str, Any]:
     try:
         status = trainer_status(entry.get("output_name", ""))
     except DockerUnreachable:
-        asyncio.ensure_future(watch(entry, notify=notify, path=path))
+        asyncio.ensure_future(watch(entry, notify=notify, path=path, close_run=close_run))
         return {"action": "resumed-watch", "reason": "docker unreachable"}
     if status["state"] == STATE_RUNNING:
-        asyncio.ensure_future(watch(entry, notify=notify, path=path))
+        asyncio.ensure_future(watch(entry, notify=notify, path=path, close_run=close_run))
         return {"action": "resumed-watch"}
-    result = await watch(entry, notify=notify, poll_seconds=0, path=path)
+    result = await watch(entry, notify=notify, poll_seconds=0, path=path, close_run=close_run)
     return {"action": "restored", **result}

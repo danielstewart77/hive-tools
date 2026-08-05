@@ -50,7 +50,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         try:
             from tools import training_gpu
 
-            outcome = await training_gpu.reconcile(notify=training_gpu.notify_owner)
+            from tools.training import close_ledger_run
+
+            outcome = await training_gpu.reconcile(
+                notify=training_gpu.notify_owner, close_run=close_ledger_run
+            )
             if outcome.get("action") != "nothing-to-do":
                 log.info("training.gpu.reconcile outcome=%s", outcome)
         except Exception as exc:  # noqa: BLE001 - startup must not be fatal
