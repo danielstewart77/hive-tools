@@ -39,6 +39,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -345,6 +346,37 @@ def heartbeat(output_name: str) -> dict[str, Any]:
     if len(parts) > 1 and beat["live"]:
         beat["uptime_seconds"] = _seconds_since(parts[1])
     return beat
+
+
+#: The trainer's own progress line. Parsed rather than recomputed here:
+#: only the trainer knows when training actually began, and a container's
+#: uptime includes a download that can be most of the first half hour.
+_PROGRESS = re.compile(
+    r"step (?P<step>\d+)/(?P<total>\d+) · (?P<percent>\d+)% · "
+    r"elapsed (?P<elapsed>.+?) · eta (?P<eta>[^·]+?)(?: · loss (?P<loss>[\d.]+))?$"
+)
+
+
+def progress_from(lines: list[str]) -> dict[str, Any]:
+    """The newest progress the trainer reported, if it has reported any.
+
+    Read from the end backwards: the interesting line is the last one,
+    and a run near its end has thousands of older ones in front of it.
+    """
+    for line in reversed(lines):
+        match = _PROGRESS.search(line.strip())
+        if not match:
+            continue
+        found = match.groupdict()
+        return {
+            "step": int(found["step"]),
+            "total_steps": int(found["total"]),
+            "percent": int(found["percent"]),
+            "elapsed": found["elapsed"].strip(),
+            "eta": found["eta"].strip(),
+            "loss": float(found["loss"]) if found["loss"] else None,
+        }
+    return {}
 
 
 def _seconds_since(timestamp: str) -> int:

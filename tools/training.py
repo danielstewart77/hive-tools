@@ -312,6 +312,7 @@ async def training_logs(name: str, tail: int = training_gpu.LOG_TAIL_LINES) -> d
         "name": name.strip(),
         **result,
         "heartbeat": training_gpu.heartbeat(name.strip()),
+        "progress": training_gpu.progress_from(result.get("lines") or []),
     }
 
 
