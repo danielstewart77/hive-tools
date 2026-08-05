@@ -282,6 +282,20 @@ async def training_status() -> dict[str, Any]:
     return await _run_cli_async(["status"], SHORT_TIMEOUT_SECONDS)
 
 
+@router.get("/logs", dependencies=[Depends(require_api_token)])
+async def training_logs(name: str, tail: int = training_gpu.LOG_TAIL_LINES) -> dict[str, Any]:
+    """Recent trainer output, for watching a run without holding it.
+
+    Polled by the console. Deliberately not a stream: a run outlives every
+    tab watching it, and a socket the trainer's survival appeared to
+    depend on is a socket someone will eventually be afraid to close.
+    """
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    result = training_gpu.trainer_logs(name.strip(), tail=max(1, min(tail, 2_000)))
+    return {"name": name.strip(), **result}
+
+
 @router.get("/runs", dependencies=[Depends(require_api_token)])
 async def training_runs(kind: str | None = None, limit: int = 20) -> dict[str, Any]:
     """Ledger history, newest first."""
@@ -398,6 +412,10 @@ async def training_train(
         args += ["--image", body.image]
     if body.dry_run:
         args.append("--dry-run")
+        # The planner sees a card still holding the voice stack and
+        # Ollama's models. A launch takes both back before the trainer
+        # starts, so the honest number to judge against includes them.
+        args += ["--reclaimable-mib", str(await training_gpu.reclaimable_mib())]
         return await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
 
     return await launch_with_gpu(body.name, args)

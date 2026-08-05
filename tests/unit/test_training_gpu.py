@@ -304,3 +304,69 @@ async def _instant(_seconds):
 
 async def _noop_coro(*args, **kwargs):
     return True
+
+
+# ------------------------------- reclaimable VRAM and watching a run go by
+
+
+async def test_reclaimable_counts_the_containers_and_ollama(monkeypatch):
+    """Requirement: feasibility is judged against post-preflight memory.
+
+    Attribution is by host pid, because from inside a container nvidia-smi
+    reports every process name as ``[Not Found]``. A test that matched on
+    names would pass against an implementation that cannot work here.
+    """
+
+    def fake_docker(args, timeout=None):
+        assert args[0] == "top"
+        pids = {"hive-mind-voice": "4444", "hive-mind-voice-kokoro": "4876"}
+        return _Completed(0, "PID\n" + pids[args[1]] + "\n", "")
+
+    def fake_smi(args, capture_output=None, text=None, timeout=None):
+        assert "--query-compute-apps=pid,used_memory" in args
+        # The two voice processes, plus two Ollama servers that are not
+        # in any container and must not be counted twice.
+        return _Completed(
+            0,
+            "4444, 9974\n4876, 2498\n3331247, 11912\n3331937, 13406\n",
+            "",
+        )
+
+    async def fake_ps(url=None):
+        return 23_898
+
+    monkeypatch.setattr(gpu, "_docker", fake_docker)
+    monkeypatch.setattr(gpu.subprocess, "run", fake_smi)
+    monkeypatch.setattr(gpu, "ollama_vram_mib", fake_ps)
+
+    total = await gpu.reclaimable_mib(["hive-mind-voice", "hive-mind-voice-kokoro"])
+
+    assert total == 9_974 + 2_498 + 23_898
+
+
+def test_trainer_logs_answer_a_finished_run_and_an_absent_one(monkeypatch):
+    """Requirement: the run can be watched without the watching mattering.
+
+    A trainer that has already exited still has output, which is exactly
+    when someone wants to read it, so a stopped container is answered
+    rather than refused.
+    """
+    docker = FakeDocker({"hive-trainer-run-a": "exited:0"})
+
+    def with_logs(args, timeout=None):
+        if args[0] == "logs":
+            if args[-1] != "hive-trainer-run-a":
+                return _Completed(1, "", f"Error: No such container: {args[-1]}")
+            return _Completed(0, "step 10 loss 1.2\n\nstep 20 loss 0.9\n", "")
+        return docker(args, timeout)
+
+    monkeypatch.setattr(gpu, "_docker", with_logs)
+
+    finished = gpu.trainer_logs("run-a")
+    assert finished["available"] is True
+    assert finished["lines"] == ["step 10 loss 1.2", "step 20 loss 0.9"]
+
+    missing = gpu.trainer_logs("run-b")
+    assert missing["available"] is False
+    assert missing["lines"] == []
+    assert "no trainer container" in missing["reason"]
