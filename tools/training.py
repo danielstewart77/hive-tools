@@ -261,19 +261,6 @@ class DeployRequest(BaseModel):
     adapter_dir: str
     base_model: str | None = None
     serve_tag: str | None = None
-    strategy: str = Field(
-        "merge",
-        pattern="^merge$",
-        description=(
-            "merge folds the adapter into the base weights and converts the "
-            "result to an f16 GGUF that Ollama quantizes on import. It is "
-            "the only route. Stacking a LoRA on a pulled tag was faster but "
-            "Ollama only supports it for the architectures its own "
-            "converter understands, which excludes what this hive trains — "
-            "so a request naming it is rejected rather than promoted to a "
-            "merge that costs an hour of GPU nobody asked for."
-        ),
-    )
     quantization: str = Field(
         "q4_K_M",
         pattern=r"^[A-Za-z0-9_]{2,12}$",
@@ -603,8 +590,6 @@ async def training_deploy(
         body.name,
         "--adapter-dir",
         body.adapter_dir,
-        "--strategy",
-        body.strategy,
         "--quantization",
         body.quantization,
         "--temperature",
