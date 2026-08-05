@@ -262,19 +262,23 @@ class DeployRequest(BaseModel):
     base_model: str | None = None
     serve_tag: str | None = None
     strategy: str = Field(
-        "adapter",
-        pattern="^(adapter|merge)$",
+        "merge",
+        pattern="^merge$",
         description=(
-            "adapter stacks the LoRA on a base tag Ollama already holds — "
-            "seconds, and a few hundred megabytes, at the cost of a mismatch "
-            "between the full-precision weights the adapter was fitted "
-            "against and the quantized copy being served. merge folds the "
-            "adapter into the weights and converts the result, which removes "
-            "the mismatch and costs a conversion pass and a full model of "
-            "disk per deploy."
+            "merge folds the adapter into the base weights and converts the "
+            "result to an f16 GGUF that Ollama quantizes on import. It is "
+            "the only route. Stacking a LoRA on a pulled tag was faster but "
+            "Ollama only supports it for the architectures its own "
+            "converter understands, which excludes what this hive trains — "
+            "so a request naming it is rejected rather than promoted to a "
+            "merge that costs an hour of GPU nobody asked for."
         ),
     )
-    quantization: str = Field("q4_K_M", pattern=r"^[A-Za-z0-9_]{2,12}$")
+    quantization: str = Field(
+        "q4_K_M",
+        pattern=r"^[A-Za-z0-9_]{2,12}$",
+        description="what Ollama quantizes the merged f16 GGUF to on import",
+    )
     temperature: float = Field(0.2, ge=0.0, le=2.0)
     num_ctx: int = Field(32_768, ge=512)
     system_prompt: str = ""
@@ -582,9 +586,9 @@ async def training_deploy(
     del caller
     in_flight = training_gpu.run_in_flight()
     if in_flight:
-        # Both strategies reach for the card — a merge launches a GPU
-        # container, an adapter upload makes Ollama load the base — so
-        # deploying last week's adapter mid-run collides with this week's.
+        # A merge launches a GPU container and an import makes Ollama load
+        # the result, so deploying last week's adapter mid-run collides
+        # with this week's.
         raise HTTPException(
             status_code=409,
             detail=(
@@ -616,6 +620,7 @@ async def training_deploy(
         args += ["--system-prompt", body.system_prompt]
     if OLLAMA_URL:
         args += ["--ollama-url", OLLAMA_URL]
-    # A merge launches a container and returns; an adapter deploy uploads a
-    # few hundred megabytes and waits on Ollama. Neither is a quick call.
+    # The first call launches a merge container and returns; the second
+    # uploads a full model and waits while Ollama quantizes it. Neither is
+    # a quick call.
     return await _run_cli_async(args, LONG_TIMEOUT_SECONDS)

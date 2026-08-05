@@ -384,8 +384,8 @@ def test_deploy_translates_the_request(client, auth_headers, fake_cli):
     assert args[args.index("--num-ctx") + 1] == "16384"
 
 
-def test_deploy_defaults_to_the_adapter_strategy(client, auth_headers, fake_cli):
-    """The cheap, reversible one. Merging costs an hour and 20 GB."""
+def test_deploy_defaults_to_merging(client, auth_headers, fake_cli):
+    """It is the only route left, so a caller naming none still gets it."""
     with _patch_run(fake_cli, {"deployed": True}):
         client.post(
             "/training/deploy",
@@ -393,17 +393,23 @@ def test_deploy_defaults_to_the_adapter_strategy(client, auth_headers, fake_cli)
             json={"name": "skippy-lora", "adapter_dir": "/data/v1/adapter"},
         )
     args = _args(fake_cli)
-    assert args[args.index("--strategy") + 1] == "adapter"
+    assert args[args.index("--strategy") + 1] == "merge"
 
 
-def test_deploy_rejects_an_unknown_strategy(client, auth_headers, fake_cli):
+def test_deploy_rejects_the_retired_adapter_strategy(client, auth_headers, fake_cli):
+    """Requirement 1: the fast route is gone, and asking for it says so.
+
+    Ollama only stacks a LoRA onto architectures its own converter knows,
+    which excludes what this hive trains. Quietly promoting the request to
+    a merge would spend an hour of GPU on a click that asked for seconds.
+    """
     response = client.post(
         "/training/deploy",
         headers=auth_headers,
         json={
             "name": "skippy-lora",
             "adapter_dir": "/data/v1/adapter",
-            "strategy": "wing-it",
+            "strategy": "adapter",
         },
     )
     assert response.status_code == 422
