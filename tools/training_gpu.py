@@ -322,7 +322,11 @@ def heartbeat(output_name: str) -> dict[str, Any]:
     the archive by two orders of magnitude. It rides on the poll instead,
     where it is read once and never stored.
     """
-    beat: dict[str, Any] = {"live": False, "uptime_seconds": 0, "vram_mib": 0, "gpu_util_pct": 0}
+    # The card is reported whether or not a trainer is on it: an operator
+    # watching this pane wants to know what their GPU is doing, and "no
+    # container, therefore no numbers" is the least useful moment to go
+    # quiet — it is exactly when they are deciding whether to launch.
+    beat: dict[str, Any] = {"live": False, "uptime_seconds": 0, **_card_state()}
     try:
         completed = _docker(
             [
@@ -338,11 +342,8 @@ def heartbeat(output_name: str) -> dict[str, Any]:
         return beat
     parts = completed.stdout.split()
     beat["live"] = bool(parts) and parts[0] == "true"
-    if len(parts) > 1:
+    if len(parts) > 1 and beat["live"]:
         beat["uptime_seconds"] = _seconds_since(parts[1])
-    if not beat["live"]:
-        return beat
-    beat["vram_mib"], beat["gpu_util_pct"] = _card_load()
     return beat
 
 
@@ -361,23 +362,39 @@ def _seconds_since(timestamp: str) -> int:
     return max(0, int(datetime.now(started.tzinfo).timestamp() - started.timestamp()))
 
 
-def _card_load() -> tuple[int, int]:
-    """Memory in use and utilisation, as the card itself reports them."""
+def _card_state() -> dict[str, Any]:
+    """What the card is doing, as the card itself reports it.
+
+    Free memory is taken from nvidia-smi rather than subtracted from the
+    total: the driver's own reserve is neither used nor free, and a
+    figure derived by arithmetic is a gigabyte optimistic on this card.
+    """
+    blank = {"gpu_name": "", "vram_mib": 0, "vram_total_mib": 0, "vram_free_mib": 0, "gpu_util_pct": 0}
     try:
         completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.used,memory.total,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True,
             text=True,
             timeout=15,
         )
     except (subprocess.SubprocessError, OSError):
-        return 0, 0
+        return blank
     if completed.returncode != 0:
-        return 0, 0
+        return blank
     parts = [p.strip() for p in (completed.stdout.splitlines() or [""])[0].split(",")]
-    if len(parts) != 2 or not all(p.isdigit() for p in parts):
-        return 0, 0
-    return int(parts[0]), int(parts[1])
+    if len(parts) != 5 or not all(p.isdigit() for p in parts[1:]):
+        return blank
+    return {
+        "gpu_name": parts[0],
+        "vram_mib": int(parts[1]),
+        "vram_total_mib": int(parts[2]),
+        "vram_free_mib": int(parts[3]),
+        "gpu_util_pct": int(parts[4]),
+    }
 
 
 def container_vram_mib(names: list[str] | None = None) -> int:
