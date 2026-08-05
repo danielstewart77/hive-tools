@@ -286,6 +286,27 @@ async def training_status() -> dict[str, Any]:
     return await _run_cli_async(["status"], SHORT_TIMEOUT_SECONDS)
 
 
+@router.get("/in-flight", dependencies=[Depends(require_api_token)])
+async def training_in_flight() -> dict[str, Any]:
+    """The run currently holding the card, if there is one.
+
+    Answered from the journal rather than the ledger: the journal exists
+    only between a preflight and its restore and is checked against the
+    live container, so it cannot report a run that finished hours ago.
+    A console loading this can attach to a run it did not start, which
+    is the ordinary case after a refresh.
+    """
+    entry = training_gpu.run_in_flight()
+    if not entry:
+        return {"in_flight": False}
+    return {
+        "in_flight": True,
+        "name": entry.get("output_name", ""),
+        "run_id": entry.get("run_id", ""),
+        "started_at": entry.get("started_at", 0),
+    }
+
+
 @router.get("/logs", dependencies=[Depends(require_api_token)])
 async def training_logs(name: str, tail: int = training_gpu.LOG_TAIL_LINES) -> dict[str, Any]:
     """Recent trainer output, for watching a run without holding it.

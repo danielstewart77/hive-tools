@@ -538,3 +538,23 @@ def test_the_newest_progress_line_is_what_gets_reported():
     assert found["loss"] == 1.6377
     # A run that has not reached the training loop claims nothing.
     assert gpu.progress_from(lines[:1]) == {}
+
+
+def test_a_stale_journal_is_not_a_run_in_flight(monkeypatch, journal):
+    """Requirement: a reloaded page attaches to a run that is really there.
+
+    The journal outliving its trainer is the ordinary aftermath of a
+    crash, and treating it as live would leave the console permanently
+    attached to a run that ended — and permanently refusing new ones.
+    """
+    gpu.write_journal({"output_name": "run-a", "run_id": "r1", "restore": []}, journal)
+    monkeypatch.setattr(gpu, "JOURNAL_PATH", journal)
+
+    monkeypatch.setattr(gpu, "_docker", FakeDocker({"hive-trainer-run-a": "running"}))
+    assert gpu.run_in_flight()["output_name"] == "run-a"
+
+    monkeypatch.setattr(gpu, "_docker", FakeDocker({"hive-trainer-run-a": "exited:0"}))
+    assert gpu.run_in_flight() is None
+
+    monkeypatch.setattr(gpu, "_docker", FakeDocker({}))
+    assert gpu.run_in_flight() is None
