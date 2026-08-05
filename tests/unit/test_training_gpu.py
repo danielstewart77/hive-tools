@@ -448,3 +448,28 @@ def test_a_finished_runs_output_survives_its_container(monkeypatch, tmp_path):
     recovered = gpu.archived_logs("run-a")
     assert recovered["available"] is True
     assert "OutOfMemoryError" in recovered["lines"][-1]
+
+
+def test_a_download_in_progress_is_visible_rather_than_blank(monkeypatch):
+    """Requirement: something is on screen from launch until the run ends.
+
+    Downloads and progress bars redraw one line with carriage returns and
+    emit no newline until they finish, so a naive split shows nothing for
+    the fifteen minutes that matter most.
+    """
+
+    def with_logs(args, timeout=None):
+        assert args[0] == "logs"
+        return _Completed(
+            0,
+            "[21:40:02] trainer container is up, reading the job spec\n",
+            "model.safetensors:  12%|# | 2.0G/16G\rmodel.safetensors:  38%|### | 6.1G/16G",
+        )
+
+    monkeypatch.setattr(gpu, "_docker", with_logs)
+
+    lines = gpu.trainer_logs("run-a")["lines"]
+
+    assert lines[0].endswith("reading the job spec")
+    assert any("12%" in line for line in lines)
+    assert any("38%" in line for line in lines)
