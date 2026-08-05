@@ -513,3 +513,28 @@ def test_a_live_run_reports_a_heartbeat_and_a_dead_one_does_not(monkeypatch):
     assert stopped["vram_free_mib"] == 1_600
 
     assert gpu.heartbeat("run-b")["live"] is False
+
+
+def test_the_newest_progress_line_is_what_gets_reported():
+    """Requirement: the console can say how much time is left.
+
+    The estimate is parsed from what the trainer said rather than
+    recomputed from container uptime, because uptime includes a download
+    that on a cold cache is most of the first half hour and would put an
+    early estimate out by an order of magnitude.
+    """
+    lines = [
+        "[03:14:02] training starts now — a line lands every step",
+        "[03:20:11] step 12/377 · 3% · elapsed 6m 09s · eta 3h 07m · loss 1.8021",
+        "[03:26:40] step 24/377 · 6% · elapsed 12m 38s · eta 3h 05m · loss 1.6377",
+    ]
+
+    found = gpu.progress_from(lines)
+
+    assert found["step"] == 24
+    assert found["total_steps"] == 377
+    assert found["percent"] == 6
+    assert found["eta"] == "3h 05m"
+    assert found["loss"] == 1.6377
+    # A run that has not reached the training loop claims nothing.
+    assert gpu.progress_from(lines[:1]) == {}
