@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -309,6 +310,74 @@ async def safe_close_run(close_run, run_id: str, outcome: str, exit_code: int | 
             await result
     except Exception as exc:  # noqa: BLE001 - the ledger is across a process boundary
         log.warning("training.gpu.close_run_failed run_id=%s error=%s", run_id, exc)
+
+
+def heartbeat(output_name: str) -> dict[str, Any]:
+    """Proof the run is alive, cheap enough to ask for once a second.
+
+    A trainer can go minutes between log lines, and a pane showing the
+    same text for five minutes is indistinguishable from a pane behind a
+    dead poller. This is deliberately *not* written into the container's
+    log: a line a second would bury the output that matters and inflate
+    the archive by two orders of magnitude. It rides on the poll instead,
+    where it is read once and never stored.
+    """
+    beat: dict[str, Any] = {"live": False, "uptime_seconds": 0, "vram_mib": 0, "gpu_util_pct": 0}
+    try:
+        completed = _docker(
+            [
+                "inspect",
+                "--format",
+                "{{.State.Running}} {{.State.StartedAt}}",
+                trainer_container(output_name),
+            ]
+        )
+    except DockerUnreachable:
+        return beat
+    if completed.returncode != 0:
+        return beat
+    parts = completed.stdout.split()
+    beat["live"] = bool(parts) and parts[0] == "true"
+    if len(parts) > 1:
+        beat["uptime_seconds"] = _seconds_since(parts[1])
+    if not beat["live"]:
+        return beat
+    beat["vram_mib"], beat["gpu_util_pct"] = _card_load()
+    return beat
+
+
+def _seconds_since(timestamp: str) -> int:
+    """Age of a Docker RFC3339 timestamp, whose fractional part is longer
+    than ``fromisoformat`` accepts on every Python before 3.11."""
+    cleaned = timestamp.replace("Z", "+00:00")
+    if "." in cleaned:
+        head, _, tail = cleaned.partition(".")
+        fraction, _, offset = tail.partition("+")
+        cleaned = f"{head}.{fraction[:6]}+{offset}" if offset else f"{head}.{fraction[:6]}"
+    try:
+        started = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return 0
+    return max(0, int(datetime.now(started.tzinfo).timestamp() - started.timestamp()))
+
+
+def _card_load() -> tuple[int, int]:
+    """Memory in use and utilisation, as the card itself reports them."""
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0, 0
+    if completed.returncode != 0:
+        return 0, 0
+    parts = [p.strip() for p in (completed.stdout.splitlines() or [""])[0].split(",")]
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return 0, 0
+    return int(parts[0]), int(parts[1])
 
 
 def container_vram_mib(names: list[str] | None = None) -> int:
