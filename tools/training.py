@@ -184,6 +184,10 @@ class ExportRequest(BaseModel):
     )
 
 
+class KillRequest(BaseModel):
+    name: str = Field(..., pattern=r"^[A-Za-z0-9._-]{1,64}$")
+
+
 class TrainRequest(BaseModel):
     train_file: str
     eval_file: str | None = None
@@ -289,11 +293,46 @@ async def training_logs(name: str, tail: int = training_gpu.LOG_TAIL_LINES) -> d
     Polled by the console. Deliberately not a stream: a run outlives every
     tab watching it, and a socket the trainer's survival appeared to
     depend on is a socket someone will eventually be afraid to close.
+
+    Falls back to the archive when the container is gone, so the output of
+    a run that has already ended is still readable — which is when most
+    people go looking for it.
     """
     if not name.strip():
         raise HTTPException(status_code=400, detail="name is required")
-    result = training_gpu.trainer_logs(name.strip(), tail=max(1, min(tail, 2_000)))
+    limit = max(1, min(tail, 2_000))
+    result = training_gpu.trainer_logs(name.strip(), tail=limit)
+    if not result.get("available"):
+        archived = training_gpu.archived_logs(name.strip(), tail=limit)
+        if archived.get("available"):
+            result = archived
     return {"name": name.strip(), **result}
+
+
+@router.post("/kill", dependencies=[Depends(require_api_token)])
+async def training_kill(body: KillRequest) -> dict[str, Any]:
+    """Stop a run in flight.
+
+    The intent is recorded before the signal is sent: exit 137 looks the
+    same whether the operator stopped the run or it was killed by the
+    kernel, so a stop that lands before the flag is written is a stop
+    that gets filed as a failure.
+
+    Everything after this is the watcher's ordinary path — it sees the
+    container end, archives the logs, restores the voice stack and closes
+    the ledger row. Nothing here restores anything itself, because two
+    restore paths racing is how the voice stack comes back twice.
+    """
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    entry = training_gpu.read_journal()
+    if entry and entry.get("output_name") == name:
+        entry["cancelled"] = True
+        training_gpu.write_journal(entry)
+    result = training_gpu.stop_trainer(name)
+    log.info("training.kill name=%s stopped=%s", name, result["stopped"])
+    return {"name": name, **result}
 
 
 @router.get("/runs", dependencies=[Depends(require_api_token)])
@@ -421,6 +460,32 @@ async def training_train(
     return await launch_with_gpu(body.name, args)
 
 
+#: How a watcher's outcome word maps onto a ledger status. "ended, outcome
+#: unknown" is deliberately absent — a run nobody can describe is left open
+#: rather than guessed at, and the reaper decides its fate on age.
+_OUTCOME_STATUS = {
+    "succeeded": "succeeded",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+
+
+async def close_ledger_run(run_id: str, outcome: str, exit_code: int | None) -> None:
+    """Write a finished run's outcome into the ledger.
+
+    The launching request returned minutes or hours ago, so nothing else
+    is left holding this run — without this the row stays ``running``
+    forever and the reaper eventually files a completed run as a failure.
+    """
+    status = _OUTCOME_STATUS.get(outcome)
+    if not status:
+        return
+    args = ["close-run", "--run-id", run_id, "--status", status]
+    if status != "succeeded":
+        args += ["--error", f"{outcome}" + (f" (exit {exit_code})" if exit_code is not None else "")]
+    await _run_cli_async(args, SHORT_TIMEOUT_SECONDS)
+
+
 async def launch_with_gpu(output_name: str, args: list[str]) -> dict[str, Any]:
     """Take the card, launch, and arm the watcher that gives it back.
 
@@ -457,7 +522,11 @@ async def launch_with_gpu(output_name: str, args: list[str]) -> dict[str, Any]:
 
     entry["run_id"] = result.get("run_id", "")
     training_gpu.write_journal(entry)
-    asyncio.ensure_future(training_gpu.watch(entry, notify=training_gpu.notify_owner))
+    asyncio.ensure_future(
+        training_gpu.watch(
+            entry, notify=training_gpu.notify_owner, close_run=close_ledger_run
+        )
+    )
     # The watcher announces the end. Nothing announced the start, so the
     # first anyone knew of the card being taken was the voice going silent.
     await training_gpu.safe_notify(

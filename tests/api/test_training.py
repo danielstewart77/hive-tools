@@ -464,7 +464,7 @@ def arbitration(tmp_path, monkeypatch):
         training_gpu.clear_journal(journal)
         return {"started": entry.get("restore", []), "failures": []}
 
-    async def fake_watch(entry, notify=None, poll_seconds=None, path=None):
+    async def fake_watch(entry, notify=None, poll_seconds=None, path=None, close_run=None):
         state["watched"].append(entry["output_name"])
         return {"outcome": "succeeded"}
 

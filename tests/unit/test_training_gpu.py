@@ -370,3 +370,81 @@ def test_trainer_logs_answer_a_finished_run_and_an_absent_one(monkeypatch):
     assert missing["available"] is False
     assert missing["lines"] == []
     assert "no trainer container" in missing["reason"]
+
+
+# -------------------------------------------- killing a run, and its evidence
+
+
+async def test_a_killed_run_restores_and_is_recorded_as_cancelled(
+    monkeypatch, journal, no_ollama, tmp_path
+):
+    """Requirement: stopping a run leaves the machine as a finished run would.
+
+    Exit 137 is what both a deliberate stop and an OOM kill look like, so
+    the test asserts the outcome word rather than the exit code — an
+    implementation inferring intent from the corpse fails here.
+    """
+    monkeypatch.setattr(gpu, "LOG_ARCHIVE_DIR", tmp_path / "logs")
+    docker = FakeDocker({"voice": "exited", "hive-trainer-run-a": "exited:137"})
+
+    def with_logs(args, timeout=None):
+        if args[0] == "logs":
+            return _Completed(0, "step 40 loss 0.8\n", "")
+        return docker(args, timeout)
+
+    monkeypatch.setattr(gpu, "_docker", with_logs)
+    monkeypatch.setattr(gpu, "evict_until_claimed", _noop_coro)
+    closed: list[tuple] = []
+    messages: list[str] = []
+
+    async def close_run(run_id, outcome, exit_code):
+        closed.append((run_id, outcome, exit_code))
+
+    entry = {"output_name": "run-a", "run_id": "r1", "restore": ["voice"], "cancelled": True}
+    gpu.write_journal(entry, journal)
+
+    result = await gpu.watch(
+        entry, notify=messages.append, poll_seconds=0, path=journal, close_run=close_run
+    )
+
+    assert result["outcome"] == "cancelled"
+    assert docker.states["voice"] == "running"
+    assert not journal.exists()
+    assert closed == [("r1", "cancelled", 137)]
+    assert "cancelled" in messages[0]
+
+
+def test_a_stop_reports_a_run_that_is_not_there(monkeypatch):
+    """Requirement: stopping nothing says so rather than erroring."""
+    monkeypatch.setattr(gpu, "_docker", FakeDocker({}))
+    assert gpu.stop_trainer("run-a") == {"stopped": False, "reason": "no run in flight"}
+
+
+def test_a_finished_runs_output_survives_its_container(monkeypatch, tmp_path):
+    """Requirement: the logs outlive the container that held them.
+
+    ``docker logs`` is the only copy and ``docker rm`` destroys it, which
+    means the run most needing explanation is the one whose evidence has
+    just been deleted.
+    """
+    monkeypatch.setattr(gpu, "LOG_ARCHIVE_DIR", tmp_path / "logs")
+    removed: list[str] = []
+
+    def with_logs(args, timeout=None):
+        if args[0] == "logs":
+            return _Completed(0, "step 40 loss 0.8\nOutOfMemoryError\n", "")
+        if args[0] == "rm":
+            removed.append(args[-1])
+            return _Completed(0, "", "")
+        return _Completed(1, "", "Error: No such object: x")
+
+    monkeypatch.setattr(gpu, "_docker", with_logs)
+
+    archived_at = gpu.archive_trainer_logs("run-a", "r1")
+    gpu.remove_trainer("run-a")
+
+    assert archived_at
+    assert removed == ["hive-trainer-run-a"]
+    recovered = gpu.archived_logs("run-a")
+    assert recovered["available"] is True
+    assert "OutOfMemoryError" in recovered["lines"][-1]
