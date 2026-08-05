@@ -491,21 +491,25 @@ def test_a_live_run_reports_a_heartbeat_and_a_dead_one_does_not(monkeypatch):
         return _Completed(1, "", "Error: No such object")
 
     def fake_smi(args, capture_output=None, text=None, timeout=None):
-        return _Completed(0, "43950, 98\n", "")
+        return _Completed(0, "NVIDIA RTX A6000, 43950, 49140, 1600, 98\n", "")
 
     monkeypatch.setattr(gpu, "_docker", fake_docker)
     monkeypatch.setattr(gpu.subprocess, "run", fake_smi)
 
     live = gpu.heartbeat("run-a")
     assert live["live"] is True
+    assert live["gpu_name"] == "NVIDIA RTX A6000"
     assert live["vram_mib"] == 43_950
+    assert live["vram_free_mib"] == 1_600
     assert live["gpu_util_pct"] == 98
     assert live["uptime_seconds"] > 0
 
     states["running"] = "false 2026-08-05T02:48:28.123456789Z"
     stopped = gpu.heartbeat("run-a")
     assert stopped["live"] is False
-    # Nothing is claimed about the card once the trainer is not on it.
-    assert stopped["vram_mib"] == 0
+    assert stopped["uptime_seconds"] == 0
+    # The card is still reported: someone deciding whether to launch is
+    # exactly who needs to know what it is holding.
+    assert stopped["vram_free_mib"] == 1_600
 
     assert gpu.heartbeat("run-b")["live"] is False
