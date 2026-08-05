@@ -82,6 +82,9 @@ TRAINER_CLAIMED_MIB = int(os.environ.get("TRAINING_CLAIMED_MIB", "4096"))
 
 DOCKER_TIMEOUT = 90
 
+#: How much of a trainer's output a log poll returns by default.
+LOG_TAIL_LINES = int(os.environ.get("TRAINING_LOG_TAIL_LINES", "200"))
+
 STATE_RUNNING = "running"
 STATE_STOPPED = "stopped"
 STATE_MISSING = "missing"
@@ -161,6 +164,116 @@ def remove_trainer(output_name: str) -> None:
         _docker(["rm", "-f", trainer_container(output_name)])
     except DockerUnreachable:
         log.warning("training.gpu.trainer_rm_failed name=%s", output_name)
+
+
+def trainer_logs(output_name: str, tail: int = LOG_TAIL_LINES) -> dict[str, Any]:
+    """Recent output from the trainer, for watching a run go by.
+
+    Read-only and entirely detached from the run: nothing here starts,
+    stops or reaps anything, and no caller's absence changes the outcome.
+    A container that has exited still has its logs, which is when they
+    matter most, so a stopped trainer is answered rather than refused.
+    """
+    name = trainer_container(output_name)
+    try:
+        completed = _docker(["logs", "--tail", str(max(1, tail)), name])
+    except DockerUnreachable as exc:
+        return {"available": False, "reason": str(exc)[:200], "lines": []}
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").lower()
+        if "no such object" in stderr or "no such container" in stderr:
+            return {"available": False, "reason": "no trainer container", "lines": []}
+        return {"available": False, "reason": completed.stderr.strip()[:200], "lines": []}
+    # The trainer writes progress to stderr and results to stdout; docker
+    # hands both back and the order between them is the order they were
+    # written, which is the order worth reading.
+    merged = (completed.stdout or "") + (completed.stderr or "")
+    return {
+        "available": True,
+        "reason": "",
+        "lines": [line for line in merged.splitlines() if line.strip()],
+    }
+
+
+def container_vram_mib(names: list[str] | None = None) -> int:
+    """VRAM held by the processes inside the named containers.
+
+    Attribution is by pid rather than by process name: from inside a
+    container ``nvidia-smi`` reports every compute app's name as
+    ``[Not Found]`` (it cannot resolve pids from another namespace) while
+    still reporting the host pid and the memory, and ``docker top`` gives
+    the host pids of a container. Names would have been the obvious key
+    and it is the one that does not work here.
+    """
+    names = names if names is not None else YIELD_CONTAINERS
+    wanted: set[str] = set()
+    for name in names:
+        try:
+            completed = _docker(["top", name, "-eo", "pid"])
+        except DockerUnreachable:
+            continue
+        if completed.returncode != 0:
+            continue
+        for line in completed.stdout.splitlines()[1:]:
+            pid = line.strip()
+            if pid.isdigit():
+                wanted.add(pid)
+    if not wanted:
+        return 0
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if completed.returncode != 0:
+        return 0
+    total = 0
+    for line in completed.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2 and parts[0] in wanted and parts[1].isdigit():
+            total += int(parts[1])
+    return total
+
+
+async def ollama_vram_mib(url: str = OLLAMA_URL) -> int:
+    """VRAM Ollama's loaded models are holding, per Ollama itself.
+
+    Its own ``/api/ps`` is the authority here rather than nvidia-smi: the
+    models are host processes, so there is no container to attribute them
+    to, and ``size_vram`` slightly under-reports against nvidia-smi. That
+    is the safe direction — a launch that reclaims a little more than
+    promised is not the failure mode worth guarding.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(f"{url}/api/ps")
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("training.gpu.ollama_ps_failed error=%s", exc)
+        return 0
+    total = 0
+    for model in payload.get("models", []) or []:
+        size = model.get("size_vram") or 0
+        if isinstance(size, (int, float)) and size > 0:
+            total += int(size) // (1024 * 1024)
+    return total
+
+
+async def reclaimable_mib(containers: list[str] | None = None) -> int:
+    """What a preflight would hand back to a trainer, right now.
+
+    Exactly the two things preflight takes — the yield containers and
+    Ollama's loaded models — so the feasibility check and the launch are
+    answering the same question. Anything it cannot measure counts as
+    zero, which refuses a borderline run rather than promising memory
+    that may not arrive.
+    """
+    return container_vram_mib(containers) + await ollama_vram_mib()
 
 
 def trainer_vram_mib() -> int:
