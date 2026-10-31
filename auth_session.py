@@ -11,12 +11,12 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 import time
 from typing import Any
 
 from fastapi import HTTPException, Request
 
+import store
 from config import SECRET_KEY
 
 try:
@@ -79,8 +79,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     return False
 
 
-def create_user(
-    db: sqlite3.Connection,
+async def create_user(
     username: str,
     password: str,
     *,
@@ -91,41 +90,23 @@ def create_user(
     if not normalized:
         raise ValueError("username must not be empty")
 
-    password_hash = hash_password(password)
-    now = int(time.time())
-    db.execute(
-        "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, ?, ?)",
-        (normalized, password_hash, int(is_admin), now),
-    )
-    db.commit()
-    return get_user_by_username(db, normalized)  # type: ignore[return-value]
+    created = await store.create_user(
+        normalized, hash_password(password), int(is_admin), int(time.time()))
+    return created  # type: ignore[return-value]
 
 
-def get_user_by_username(
-    db: sqlite3.Connection, username: str
+async def get_user_by_username(username: str) -> dict[str, Any] | None:
+    return await store.user_by_username(username.strip().lower())
+
+
+async def get_user_by_id(user_id: int) -> dict[str, Any] | None:
+    return await store.user_by_id(user_id)
+
+
+async def verify_user_credentials(
+    username: str, password: str
 ) -> dict[str, Any] | None:
-    normalized = username.strip().lower()
-    row = db.execute(
-        "SELECT id, username, password_hash, is_admin, created_at, disabled_at "
-        "FROM users WHERE username = ?",
-        (normalized,),
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def get_user_by_id(db: sqlite3.Connection, user_id: int) -> dict[str, Any] | None:
-    row = db.execute(
-        "SELECT id, username, password_hash, is_admin, created_at, disabled_at "
-        "FROM users WHERE id = ?",
-        (user_id,),
-    ).fetchone()
-    return dict(row) if row else None
-
-
-def verify_user_credentials(
-    db: sqlite3.Connection, username: str, password: str
-) -> dict[str, Any] | None:
-    user = get_user_by_username(db, username)
+    user = await get_user_by_username(username)
     if not user or user.get("disabled_at"):
         return None
     if not verify_password(password, user["password_hash"]):
@@ -183,22 +164,22 @@ def read_session_token(token: str) -> dict[str, Any] | None:
         return None
 
 
-def get_current_user_from_request(request: Request) -> dict[str, Any] | None:
+async def get_current_user_from_request(
+        request: Request) -> dict[str, Any] | None:
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         return None
     session = read_session_token(token)
     if not session:
         return None
-    db: sqlite3.Connection = request.app.state.db
-    user = get_user_by_id(db, int(session["user_id"]))
+    user = await get_user_by_id(int(session["user_id"]))
     if not user or user.get("disabled_at"):
         return None
     return user
 
 
-def require_auth(request: Request) -> dict[str, Any]:
-    user = get_current_user_from_request(request)
+async def require_auth(request: Request) -> dict[str, Any]:
+    user = await get_current_user_from_request(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user

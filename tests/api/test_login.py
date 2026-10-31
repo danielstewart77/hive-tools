@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 from pathlib import Path
 
 import pytest
@@ -19,8 +22,12 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app, follow_redirects=False)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app, follow_redirects=False) as entered:
+        yield entered
 
 
 def test_get_login_page_returns_html(client: TestClient) -> None:
@@ -30,7 +37,7 @@ def test_get_login_page_returns_html(client: TestClient) -> None:
 
 
 def test_post_login_valid_sets_cookie(app: FastAPI, client: TestClient) -> None:
-    create_user(app.state.db, "daniel", "pass123", is_admin=True)
+    asyncio.run(create_user("daniel", "pass123", is_admin=True))
     resp = client.post(
         "/login",
         data={"username": "daniel", "password": "pass123"},

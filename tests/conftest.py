@@ -68,12 +68,24 @@ def tmp_db(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def db_conn(tmp_db: Path) -> Generator[sqlite3.Connection, None, None]:
-    """Return an initialized database connection."""
-    from db import init_db
+    """Open the store on a temporary database and hand back its connection.
 
-    conn = init_db(str(tmp_db))
-    yield conn
-    conn.close()
+    The operations are module-level and async now, so a unit test needs the
+    store open rather than a connection of its own. The connection yielded
+    is the one the store is using, so a test that sets up a row directly
+    cannot set up state the operations would not see.
+    """
+    import asyncio
+
+    import store
+
+    asyncio.run(store.open(str(tmp_db)))
+    connection = store.sqlite_connection()
+    assert connection is not None
+    try:
+        yield connection
+    finally:
+        asyncio.run(store.close())
 
 
 def pytest_pyfunc_call(pyfuncitem):

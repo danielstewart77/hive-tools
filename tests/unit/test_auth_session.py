@@ -35,23 +35,23 @@ def test_verify_password_wrong() -> None:
     assert verify_password("wrong", hashed) is False
 
 
-def test_create_user_and_get_by_username(db_conn: sqlite3.Connection) -> None:
+async def test_create_user_and_get_by_username(db_conn: sqlite3.Connection) -> None:
     from auth_session import create_user, get_user_by_username
 
-    user = create_user(db_conn, "daniel", "pass123")
+    user = await create_user("daniel", "pass123")
     assert user["username"] == "daniel"
 
-    fetched = get_user_by_username(db_conn, "daniel")
+    fetched = await get_user_by_username("daniel")
     assert fetched is not None
     assert fetched["username"] == "daniel"
 
 
-def test_create_user_duplicate_raises(db_conn: sqlite3.Connection) -> None:
+async def test_create_user_duplicate_raises(db_conn: sqlite3.Connection) -> None:
     from auth_session import create_user
 
-    create_user(db_conn, "daniel", "pass123")
+    await create_user("daniel", "pass123")
     with pytest.raises(sqlite3.IntegrityError):
-        create_user(db_conn, "daniel", "pass456")
+        await create_user("daniel", "pass456")
 
 
 def test_create_session_token_and_read_back() -> None:
@@ -71,30 +71,30 @@ def test_read_session_token_invalid_returns_none() -> None:
     assert result is None
 
 
-def test_verify_user_credentials_valid(db_conn: sqlite3.Connection) -> None:
+async def test_verify_user_credentials_valid(db_conn: sqlite3.Connection) -> None:
     from auth_session import create_user, verify_user_credentials
 
-    create_user(db_conn, "daniel", "pass123")
-    user = verify_user_credentials(db_conn, "daniel", "pass123")
+    await create_user("daniel", "pass123")
+    user = await verify_user_credentials("daniel", "pass123")
     assert user is not None
     assert user["username"] == "daniel"
 
 
-def test_verify_user_credentials_disabled_returns_none(
+async def test_verify_user_credentials_disabled_returns_none(
     db_conn: sqlite3.Connection,
 ) -> None:
     import time
 
     from auth_session import create_user, verify_user_credentials
 
-    create_user(db_conn, "daniel", "pass123")
+    await create_user("daniel", "pass123")
     db_conn.execute(
         "UPDATE users SET disabled_at = ? WHERE username = ?",
         (int(time.time()), "daniel"),
     )
     db_conn.commit()
 
-    result = verify_user_credentials(db_conn, "daniel", "pass123")
+    result = await verify_user_credentials("daniel", "pass123")
     assert result is None
 
 

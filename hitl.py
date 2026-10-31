@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import time
 import uuid
 from typing import Any
 
 from fastapi import Depends, Request
 
+import store
 from auth_api import require_api_token
 
 log = logging.getLogger(__name__)
@@ -40,8 +40,7 @@ class HITLPendingException(Exception):
         super().__init__(f"HITL approval required: {request_id}")
 
 
-def _check_hitl(
-    db: sqlite3.Connection,
+async def _check_hitl(
     tool_name: str,
     caller_mind: str,
     params_json: str = "{}",
@@ -50,10 +49,7 @@ def _check_hitl(
     tool_body: str | None = None,
 ) -> str:
     """Core HITL logic. Returns caller_mind if allowed, raises HITLPendingException otherwise."""
-    row = db.execute(
-        "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
-        (tool_name,),
-    ).fetchone()
+    row = await store.setting(tool_name)
 
     if row is None:
         return caller_mind
@@ -65,11 +61,7 @@ def _check_hitl(
 
     if mode == "sudo":
         now = int(time.time())
-        grant = db.execute(
-            "SELECT id FROM sudo_grants "
-            "WHERE tool_name = ? AND caller_mind = ? AND expires_at > ?",
-            (tool_name, caller_mind, now),
-        ).fetchone()
+        grant = await store.active_grant(tool_name, caller_mind, now)
         if grant is not None:
             return caller_mind
 
@@ -78,13 +70,10 @@ def _check_hitl(
     now = int(time.time())
     expires_at = now + HITL_EXPIRY_SECONDS
 
-    db.execute(
-        "INSERT INTO hitl_requests "
-        "(id, tool_name, caller_mind, params_json, tool_method, tool_path, tool_body, status, created_at, expires_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
-        (request_id, tool_name, caller_mind, params_json, tool_method, tool_path, tool_body, now, expires_at),
+    await store.create_request(
+        request_id, tool_name, caller_mind, params_json, now, expires_at,
+        tool_method, tool_path, tool_body,
     )
-    db.commit()
 
     try:
         notify_daniel(tool_name, caller_mind, params_json, request_id)
@@ -129,10 +118,8 @@ def hitl_gate(tool_name: str):
         if caller_mind == "internal":
             return caller_mind
 
-        db: sqlite3.Connection = request.app.state.db
         body_bytes = await request.body()
-        return _check_hitl(
-            db,
+        return await _check_hitl(
             tool_name,
             caller_mind,
             tool_method=request.method,
@@ -143,8 +130,7 @@ def hitl_gate(tool_name: str):
     return _check
 
 
-def sync_tool_registry(
-    db: sqlite3.Connection,
+async def sync_tool_registry(
     default_mode: str = AUTO_REGISTER_DEFAULT_MODE,
     default_sudo_timeout_minutes: int = AUTO_REGISTER_DEFAULT_SUDO_TIMEOUT_MINUTES,
 ) -> int:
@@ -156,26 +142,16 @@ def sync_tool_registry(
     """
     inserted = 0
     for name in sorted(_REGISTERED_TOOLS):
-        cur = db.execute(
-            "INSERT OR IGNORE INTO tool_hitl_settings "
-            "(tool_name, mode, sudo_timeout_minutes) VALUES (?, ?, ?)",
-            (name, default_mode, default_sudo_timeout_minutes),
-        )
-        if cur.rowcount > 0:
-            inserted += 1
-    db.commit()
+        inserted += await store.seed_setting(
+            name, default_mode, default_sudo_timeout_minutes)
     if inserted:
         log.info("sync_tool_registry: registered %d new gated tool(s)", inserted)
     return inserted
 
 
-def get_hitl_status(db: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
+async def get_hitl_status(request_id: str) -> dict[str, Any] | None:
     """Get the current status of a HITL request, accounting for expiry."""
-    row = db.execute(
-        "SELECT id, tool_name, caller_mind, status, created_at, expires_at, decided_at "
-        "FROM hitl_requests WHERE id = ?",
-        (request_id,),
-    ).fetchone()
+    row = await store.request(request_id)
 
     if row is None:
         return None
@@ -196,61 +172,51 @@ def get_hitl_status(db: sqlite3.Connection, request_id: str) -> dict[str, Any] |
     }
 
 
-def respond_to_hitl(
-    db: sqlite3.Connection, request_id: str, action: str
+async def respond_to_hitl(
+    request_id: str, action: str
 ) -> dict[str, Any] | None:
-    """Approve or deny a HITL request."""
-    row = db.execute(
-        "SELECT id, tool_name, caller_mind, status, expires_at, tool_method, tool_path, tool_body "
-        "FROM hitl_requests WHERE id = ?",
-        (request_id,),
-    ).fetchone()
+    """Approve or deny a HITL request.
+
+    The decision is one statement guarded on the request still being pending
+    and not yet expired, so two people reaching the queue at the same moment
+    produce one decision. What it changed is what it hands back: a request
+    that was already settled, or that expired while the page was open,
+    changes nothing and is reported as already resolved rather than being
+    overwritten.
+    """
+    now = int(time.time())
+    new_status = "approved" if action == "approve" else "denied"
+    row = await store.decide_request(request_id, new_status, now, now)
 
     if row is None:
-        return None
-
-    if row["status"] != "pending":
-        return {"error": "already_resolved", "current_status": row["status"]}
-
-    now = int(time.time())
-    if now > row["expires_at"]:
+        # Nothing was decided. Say which of the three reasons it was, because
+        # "no such request" and "somebody got there first" are different
+        # sentences, and an expired one is neither.
+        existing = await store.request(request_id)
+        if existing is None:
+            return None
+        if existing["status"] != "pending":
+            return {"error": "already_resolved",
+                    "current_status": existing["status"]}
         return {"error": "already_resolved", "current_status": "expired"}
-
-    new_status = "approved" if action == "approve" else "denied"
-    db.execute(
-        "UPDATE hitl_requests SET status = ?, decided_at = ? WHERE id = ?",
-        (new_status, now, request_id),
-    )
 
     # Replay data returned to caller — fired as async background task by the route handler
     replay: dict[str, str] | None = None
     if new_status == "approved":
-        r_method = row["tool_method"]
-        r_path = row["tool_path"]
-        r_body = row["tool_body"]
+        r_method = row.get("tool_method")
+        r_path = row.get("tool_path")
+        r_body = row.get("tool_body")
         if r_method and r_path and r_body is not None:
             replay = {"method": r_method, "path": r_path, "body": r_body}
 
     # If approved and tool is in sudo mode, create a sudo grant
     if new_status == "approved":
-        setting = db.execute(
-            "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
-            (row["tool_name"],),
-        ).fetchone()
+        setting = await store.setting(row["tool_name"])
         if setting and setting["mode"] == "sudo":
-            timeout_minutes = setting["sudo_timeout_minutes"]
-            db.execute(
-                "INSERT INTO sudo_grants (tool_name, caller_mind, granted_at, expires_at) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    row["tool_name"],
-                    row["caller_mind"],
-                    now,
-                    now + timeout_minutes * 60,
-                ),
-            )
-
-    db.commit()
+            timeout_minutes = int(setting["sudo_timeout_minutes"])
+            await store.grant_sudo(
+                row["tool_name"], row["caller_mind"], now,
+                now + timeout_minutes * 60)
 
     result = {
         "hitl_request_id": request_id,

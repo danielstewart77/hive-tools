@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -20,15 +23,19 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app) as entered:
+        yield entered
 
 
 @pytest.fixture()
 def auth_headers(app: FastAPI) -> dict[str, str]:
     from auth_api import generate_token
 
-    raw = generate_token(app.state.db, "ada")
+    raw = asyncio.run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 

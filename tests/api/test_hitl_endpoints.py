@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 import time
 import uuid
 from pathlib import Path
@@ -28,13 +31,17 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app, raise_server_exceptions=False)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app, raise_server_exceptions=False) as entered:
+        yield entered
 
 
 @pytest.fixture()
-def auth_header(app: FastAPI) -> dict[str, str]:
-    raw = generate_token(app.state.db, "ada")
+def auth_header(client: TestClient) -> dict[str, str]:
+    raw = asyncio.run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 

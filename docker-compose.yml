@@ -1,6 +1,12 @@
 services:
   hive-tools:
-    build: .
+    build:
+      context: .
+      additional_contexts:
+        # The access layer lives in its own repository and is private, so it
+        # arrives as a second build context rather than as a git install
+        # needing a credential in the build.
+        hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
     container_name: hive-tools
     env_file: .env
     ports:

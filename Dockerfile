@@ -36,8 +36,16 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright
 
+# The hive's data-access layer, from a build context of its own rather than
+# from git: the repository is private, so installing it by URL would need a
+# credential at build time. `--no-deps` is deliberate - its dependencies are
+# declared in requirements.txt above, where this image's resolver can see
+# them beside everything else.
+COPY --from=hive_data . /tmp/hive-data
+RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data
+
 # Copy application code
-COPY server.py config.py db.py schemas.py hitl.py auth_api.py auth_session.py ui.py hive_logging.py ./
+COPY server.py config.py db.py schemas.py hitl.py auth_api.py auth_session.py store.py ui.py hive_logging.py ./
 COPY tools/ tools/
 COPY templates/ templates/
 

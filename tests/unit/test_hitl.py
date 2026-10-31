@@ -9,15 +9,15 @@ import uuid
 import pytest
 
 
-def test_hitl_gate_mode_off_passes_through(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_gate_mode_off_passes_through(db_conn: sqlite3.Connection) -> None:
     from hitl import _check_hitl
 
     # No setting row means default "off"
-    result = _check_hitl(db_conn, "calendar_list_events", "ada")
+    result = await _check_hitl("calendar_list_events", "ada")
     assert result == "ada"
 
 
-def test_hitl_gate_mode_on_creates_request_and_raises_202(
+async def test_hitl_gate_mode_on_creates_request_and_raises_202(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
@@ -29,13 +29,13 @@ def test_hitl_gate_mode_on_creates_request_and_raises_202(
     db_conn.commit()
 
     with pytest.raises(HITLPendingException) as exc_info:
-        _check_hitl(db_conn, "gmail_send_email", "ada")
+        await _check_hitl("gmail_send_email", "ada")
 
     assert exc_info.value.request_id is not None
     uuid.UUID(exc_info.value.request_id)  # must be valid UUID
 
 
-def test_hitl_gate_mode_sudo_with_valid_grant_passes_through(
+async def test_hitl_gate_mode_sudo_with_valid_grant_passes_through(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import _check_hitl
@@ -51,11 +51,11 @@ def test_hitl_gate_mode_sudo_with_valid_grant_passes_through(
     )
     db_conn.commit()
 
-    result = _check_hitl(db_conn, "browser_navigate", "ada")
+    result = await _check_hitl("browser_navigate", "ada")
     assert result == "ada"
 
 
-def test_hitl_gate_mode_sudo_without_grant_creates_request(
+async def test_hitl_gate_mode_sudo_without_grant_creates_request(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
@@ -67,10 +67,10 @@ def test_hitl_gate_mode_sudo_without_grant_creates_request(
     db_conn.commit()
 
     with pytest.raises(HITLPendingException):
-        _check_hitl(db_conn, "browser_navigate", "ada")
+        await _check_hitl("browser_navigate", "ada")
 
 
-def test_hitl_gate_mode_sudo_with_expired_grant_creates_request(
+async def test_hitl_gate_mode_sudo_with_expired_grant_creates_request(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
@@ -87,19 +87,19 @@ def test_hitl_gate_mode_sudo_with_expired_grant_creates_request(
     db_conn.commit()
 
     with pytest.raises(HITLPendingException):
-        _check_hitl(db_conn, "browser_navigate", "ada")
+        await _check_hitl("browser_navigate", "ada")
 
 
-def test_hitl_gate_no_setting_defaults_to_off(
+async def test_hitl_gate_no_setting_defaults_to_off(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import _check_hitl
 
-    result = _check_hitl(db_conn, "nonexistent_tool", "ada")
+    result = await _check_hitl("nonexistent_tool", "ada")
     assert result == "ada"
 
 
-def test_hitl_request_has_uuid_id(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_request_has_uuid_id(db_conn: sqlite3.Connection) -> None:
     from hitl import HITLPendingException, _check_hitl
 
     db_conn.execute(
@@ -109,12 +109,12 @@ def test_hitl_request_has_uuid_id(db_conn: sqlite3.Connection) -> None:
     db_conn.commit()
 
     with pytest.raises(HITLPendingException) as exc_info:
-        _check_hitl(db_conn, "test_tool", "ada")
+        await _check_hitl("test_tool", "ada")
 
     uuid.UUID(exc_info.value.request_id)
 
 
-def test_hitl_request_expires_in_5_minutes(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_request_expires_in_5_minutes(db_conn: sqlite3.Connection) -> None:
     from hitl import HITLPendingException, _check_hitl
 
     db_conn.execute(
@@ -124,7 +124,7 @@ def test_hitl_request_expires_in_5_minutes(db_conn: sqlite3.Connection) -> None:
     db_conn.commit()
 
     with pytest.raises(HITLPendingException) as exc_info:
-        _check_hitl(db_conn, "test_tool", "ada")
+        await _check_hitl("test_tool", "ada")
 
     row = db_conn.execute(
         "SELECT created_at, expires_at FROM hitl_requests WHERE id = ?",

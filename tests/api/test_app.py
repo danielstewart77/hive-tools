@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 from pathlib import Path
 
 import pytest
@@ -17,8 +20,12 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app) as entered:
+        yield entered
 
 
 def test_health_endpoint_returns_200(client: TestClient) -> None:
@@ -27,6 +34,21 @@ def test_health_endpoint_returns_200(client: TestClient) -> None:
     assert resp.json() == {"status": "ok"}
 
 
-def test_app_initializes_db_on_startup(app: FastAPI) -> None:
-    assert hasattr(app.state, "db")
-    assert app.state.db is not None
+def test_starting_the_app_opens_its_store(app: FastAPI) -> None:
+    """Nothing opens a database while the app is being built, so the lifespan
+    is the only thing that can. An operation reached before start says so
+    rather than connecting on demand behind somebody's back."""
+    import asyncio
+
+    import store
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(store.count_users())
+
+    with TestClient(app):
+        # The bootstrap admin is seeded at start, so a read answering at all
+        # is the store being open and a count of one is the seed having run.
+        assert asyncio.run(store.count_users()) == 1
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(store.count_users())

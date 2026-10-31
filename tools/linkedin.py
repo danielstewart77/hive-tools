@@ -126,6 +126,5 @@ async def post_to_linkedin(
     if token is None:
         return {"error": "LinkedIn token file not found. Authenticate first."}
     # Token exists — now request HITL approval if configured
-    db = request.app.state.db
-    _check_hitl(db, "linkedin_post", caller_mind)
+    await _check_hitl("linkedin_post", caller_mind)
     return _post_to_linkedin_impl(body.content, body.image_path)

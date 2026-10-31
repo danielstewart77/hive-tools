@@ -5,10 +5,10 @@ from __future__ import annotations
 import sqlite3
 
 
-def test_seed_creates_default_settings(db_conn: sqlite3.Connection) -> None:
+async def test_seed_creates_default_settings(db_conn: sqlite3.Connection) -> None:
     from db import seed_default_hitl_settings
 
-    seed_default_hitl_settings(db_conn)
+    await seed_default_hitl_settings()
 
     rows = db_conn.execute("SELECT tool_name, mode FROM tool_hitl_settings").fetchall()
     tool_names = {row["tool_name"] for row in rows}
@@ -20,10 +20,10 @@ def test_seed_creates_default_settings(db_conn: sqlite3.Connection) -> None:
     assert "docker_compose_up" in tool_names
 
 
-def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -> None:
+async def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -> None:
     from db import seed_default_hitl_settings
 
-    seed_default_hitl_settings(db_conn)
+    await seed_default_hitl_settings()
 
     # Manually change a setting
     db_conn.execute(
@@ -32,7 +32,7 @@ def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -> None
     db_conn.commit()
 
     # Seed again
-    seed_default_hitl_settings(db_conn)
+    await seed_default_hitl_settings()
 
     row = db_conn.execute(
         "SELECT mode FROM tool_hitl_settings WHERE tool_name = 'gmail_send_email'"
@@ -41,10 +41,10 @@ def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -> None
     assert row["mode"] == "sudo"
 
 
-def test_default_modes_match_spec(db_conn: sqlite3.Connection) -> None:
+async def test_default_modes_match_spec(db_conn: sqlite3.Connection) -> None:
     from db import seed_default_hitl_settings
 
-    seed_default_hitl_settings(db_conn)
+    await seed_default_hitl_settings()
 
     def get_mode(tool_name: str) -> str:
         row = db_conn.execute(
