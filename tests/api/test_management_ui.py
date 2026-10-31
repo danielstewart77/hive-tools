@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 import time
 import uuid
 from pathlib import Path
@@ -22,17 +25,21 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app, follow_redirects=False)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app, follow_redirects=False) as entered:
+        yield entered
 
 
 @pytest.fixture()
-def authed_client(app: FastAPI) -> TestClient:
-    """Client with session cookie set."""
-    user = create_user(app.state.db, "daniel", "pass123", is_admin=True)
-    token = create_session_token(user)
-    client = TestClient(app, follow_redirects=False, cookies={"ht_session": token})
-    return client
+def authed_client(app: FastAPI) -> Generator[TestClient, None, None]:
+    """Client with session cookie set, on an app that has been started."""
+    with TestClient(app, follow_redirects=False) as entered:
+        user = asyncio.run(create_user("daniel", "pass123", is_admin=True))
+        entered.cookies.set("ht_session", create_session_token(user))
+        yield entered
 
 
 def test_dashboard_requires_auth(client: TestClient) -> None:
@@ -71,7 +78,7 @@ def test_tools_page_save_updates_hitl_mode(
 
 
 def test_tokens_page_lists_tokens(app: FastAPI, authed_client: TestClient) -> None:
-    generate_token(app.state.db, "ada")
+    asyncio.run(generate_token("ada"))
     resp = authed_client.get("/tokens")
     assert resp.status_code == 200
     assert "ada" in resp.text
@@ -90,7 +97,7 @@ def test_tokens_create_shows_raw_token_once(authed_client: TestClient) -> None:
 def test_tokens_revoke_sets_revoked_at(
     app: FastAPI, authed_client: TestClient
 ) -> None:
-    generate_token(app.state.db, "ada")
+    asyncio.run(generate_token("ada"))
     row = app.state.db.execute(
         "SELECT id FROM api_tokens WHERE name = ?", ("ada",)
     ).fetchone()

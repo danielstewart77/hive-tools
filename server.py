@@ -19,8 +19,8 @@ from auth_session import (
     set_session_cookie,
     verify_user_credentials,
 )
+import store
 from config import BASE_DIR, DB_PATH
-from db import init_db
 from hitl import (
     HITLPendingException,
     _replay_request_async,
@@ -40,13 +40,44 @@ def create_app(db_path: str | None = None) -> FastAPI:
     """Application factory."""
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        """Pick up a training run this process was watching when it died.
+        """Open the store, seed what a fresh install needs, then run.
 
+        The store is opened here rather than while the app is being built,
+        because opening a connection pool is async and because a module that
+        connected at import would do it again in every test that imported
+        it. Everything that writes at startup therefore also happens here:
+        the bootstrap admin, the shipped approval modes, and the gated tools
+        the routers registered as they were imported.
+
+        Then: pick up a training run this process was watching when it died.
         The watcher holding the restore obligation lives in this process's
         event loop, so a redeploy mid-run would otherwise leave the voice
         stack stopped and Ollama evicted with nobody left to put them
         back. The journal on disk is what survives; this reads it.
         """
+        await store.open(db_path or DB_PATH)
+        _app.state.db = store.sqlite_connection()
+        log.info("hive-tools store: %s",
+                 "postgres" if store.on_postgres() else "sqlite")
+
+        if await store.count_users() == 0:
+            import os
+
+            bootstrap_password = os.getenv("HT_ADMIN_PASSWORD", "changeme")
+            await create_user("admin", bootstrap_password, is_admin=True)
+            log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var no "
+                     "longer needed after this boot)")
+
+        from db import seed_default_hitl_settings
+
+        await seed_default_hitl_settings()
+
+        # Every tool router has been imported by now, so `hitl_gate()`'s
+        # side effects have populated `hitl._REGISTERED_TOOLS`. Seeding is
+        # insert-if-absent: a mode the operator turned off stays off across
+        # a restart.
+        await sync_tool_registry()
+
         try:
             from tools import training_gpu
 
@@ -59,7 +90,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
                 log.info("training.gpu.reconcile outcome=%s", outcome)
         except Exception as exc:  # noqa: BLE001 - startup must not be fatal
             log.warning("training.gpu.reconcile_failed error=%s", exc)
-        yield
+        try:
+            yield
+        finally:
+            await store.close()
 
     app = FastAPI(
         title="HiveTools",
@@ -70,27 +104,6 @@ def create_app(db_path: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     install_fastapi_logging(app, log, "hive-tools")
-
-    # Initialize database
-    resolved_path = db_path or DB_PATH
-    conn = init_db(resolved_path)
-    app.state.db = conn
-
-    # Seed default admin if users table is empty (bootstrap only — password read from env)
-    row = conn.execute("SELECT COUNT(*) as cnt FROM users").fetchone()
-    if row["cnt"] == 0:
-        import os
-        bootstrap_password = os.getenv("HT_ADMIN_PASSWORD", "changeme")
-        create_user(conn, "admin", bootstrap_password, is_admin=True)
-        log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var no longer needed after this boot)")
-
-    # Seed default HITL settings
-    try:
-        from db import seed_default_hitl_settings
-
-        seed_default_hitl_settings(conn)
-    except ImportError:
-        pass
 
     # ---- Health ----
     @app.get("/health")
@@ -108,7 +121,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         username: str = Form(...),
         password: str = Form(...),
     ) -> Any:
-        user = verify_user_credentials(app.state.db, username, password)
+        user = await verify_user_credentials(username, password)
         if not user:
             log_event(log, "tools.login.rejected", level=logging.WARNING, username=username)
             return JSONResponse(
@@ -125,7 +138,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         request_id: str,
         caller: str = Depends(require_api_token),
     ) -> Any:
-        status = get_hitl_status(app.state.db, request_id)
+        status = await get_hitl_status(request_id)
         if status is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
@@ -147,7 +160,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         body: HITLRespondRequest,
         caller: str = Depends(require_api_token),
     ) -> Any:
-        result = respond_to_hitl(app.state.db, request_id, body.action)
+        result = await respond_to_hitl(request_id, body.action)
         if result is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
         if "error" in result and result["error"] == "already_resolved":
@@ -164,7 +177,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     # ---- Dashboard (requires session auth) ----
     @app.get("/")
     async def dashboard(request: Request) -> Any:
-        user = get_current_user_from_request(request)
+        user = await get_current_user_from_request(request)
         if not user:
             return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(
@@ -259,12 +272,6 @@ def create_app(db_path: str | None = None) -> FastAPI:
         app.include_router(ui_router)
     except ImportError:
         pass
-
-    # All tool routers have been imported by this point, so hitl_gate()
-    # side effects have populated hitl._REGISTERED_TOOLS. Sync any gated
-    # tool that doesn't yet have a row into tool_hitl_settings with the
-    # default mode='on' so the control panel surfaces it automatically.
-    sync_tool_registry(conn)
 
     return app
 

@@ -74,12 +74,10 @@ def docker_mutate_gate(tool_name: str):
             return caller_mind
         if os.path.basename(path.rstrip("/")) in MUTATE_BLOCKED:
             raise ValueError(f"Mutating operations on '{path}' are blocked.")
-        db = request.app.state.db
         body_bytes = await request.body()
         qs = str(request.query_params)
         tool_path = f"{request.url.path}?{qs}" if qs else request.url.path
-        return _check_hitl(
-            db,
+        return await _check_hitl(
             tool_name,
             caller_mind,
             tool_method=request.method,

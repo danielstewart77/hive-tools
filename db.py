@@ -139,12 +139,14 @@ _DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
 ]
 
 
-def seed_default_hitl_settings(db: sqlite3.Connection) -> None:
-    """Insert default HITL settings using INSERT OR IGNORE (does not overwrite)."""
+async def seed_default_hitl_settings() -> None:
+    """Give each shipped tool its mode only if it has none.
+
+    Insert-if-absent, and that is the point: this runs on every boot, so a
+    replacing write would re-arm every approval gate the operator had turned
+    off, on every deploy, silently.
+    """
+    import store
+
     for tool_name, mode, timeout in _DEFAULT_HITL_SETTINGS:
-        db.execute(
-            "INSERT OR IGNORE INTO tool_hitl_settings (tool_name, mode, sudo_timeout_minutes) "
-            "VALUES (?, ?, ?)",
-            (tool_name, mode, timeout),
-        )
-    db.commit()
+        await store.seed_setting(tool_name, mode, timeout)

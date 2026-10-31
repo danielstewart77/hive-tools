@@ -7,10 +7,10 @@ import sqlite3
 import time
 
 
-def test_generate_token_returns_raw_and_stores_hash(db_conn: sqlite3.Connection) -> None:
+async def test_generate_token_returns_raw_and_stores_hash(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token
 
-    raw = generate_token(db_conn, "ada")
+    raw = await generate_token("ada")
     assert isinstance(raw, str)
     assert len(raw) > 20
 
@@ -19,53 +19,53 @@ def test_generate_token_returns_raw_and_stores_hash(db_conn: sqlite3.Connection)
     assert row["token_hash"] == hashlib.sha256(raw.encode()).hexdigest()
 
 
-def test_generate_token_hash_is_sha256(db_conn: sqlite3.Connection) -> None:
+async def test_generate_token_hash_is_sha256(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token
 
-    raw = generate_token(db_conn, "bob")
+    raw = await generate_token("bob")
     expected_hash = hashlib.sha256(raw.encode()).hexdigest()
 
     row = db_conn.execute("SELECT token_hash FROM api_tokens WHERE name = ?", ("bob",)).fetchone()
     assert row["token_hash"] == expected_hash
 
 
-def test_validate_token_returns_mind_name(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_returns_mind_name(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, validate_token
 
-    raw = generate_token(db_conn, "ada")
-    result = validate_token(db_conn, raw)
+    raw = await generate_token("ada")
+    result = await validate_token(raw)
     assert result == "ada"
 
 
-def test_validate_token_invalid_returns_none(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_invalid_returns_none(db_conn: sqlite3.Connection) -> None:
     from auth_api import validate_token
 
-    result = validate_token(db_conn, "not-a-real-token")
+    result = await validate_token("not-a-real-token")
     assert result is None
 
 
-def test_validate_token_revoked_returns_none(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_revoked_returns_none(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, revoke_token, validate_token
 
-    raw = generate_token(db_conn, "ada")
+    raw = await generate_token("ada")
     row = db_conn.execute("SELECT id FROM api_tokens WHERE name = ?", ("ada",)).fetchone()
-    revoke_token(db_conn, row["id"])
+    await revoke_token(row["id"])
 
-    result = validate_token(db_conn, raw)
+    result = await validate_token(raw)
     assert result is None
 
 
-def test_validate_token_updates_last_used_at(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_updates_last_used_at(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, validate_token
 
-    raw = generate_token(db_conn, "ada")
+    raw = await generate_token("ada")
 
     row_before = db_conn.execute(
         "SELECT last_used_at FROM api_tokens WHERE name = ?", ("ada",)
     ).fetchone()
     assert row_before["last_used_at"] is None
 
-    validate_token(db_conn, raw)
+    await validate_token(raw)
 
     row_after = db_conn.execute(
         "SELECT last_used_at FROM api_tokens WHERE name = ?", ("ada",)
@@ -74,13 +74,13 @@ def test_validate_token_updates_last_used_at(db_conn: sqlite3.Connection) -> Non
     assert row_after["last_used_at"] >= int(time.time()) - 5
 
 
-def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None:
+async def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, revoke_token
 
-    generate_token(db_conn, "ada")
+    await generate_token("ada")
     row = db_conn.execute("SELECT id FROM api_tokens WHERE name = ?", ("ada",)).fetchone()
 
-    result = revoke_token(db_conn, row["id"])
+    result = await revoke_token(row["id"])
     assert result is True
 
     row_after = db_conn.execute(
@@ -89,17 +89,17 @@ def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None:
     assert row_after["revoked_at"] is not None
 
 
-def test_list_tokens_returns_all(db_conn: sqlite3.Connection) -> None:
+async def test_list_tokens_returns_all(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, list_tokens, revoke_token
 
-    generate_token(db_conn, "ada")
-    generate_token(db_conn, "bob")
+    await generate_token("ada")
+    await generate_token("bob")
 
     # Revoke one
     row = db_conn.execute("SELECT id FROM api_tokens WHERE name = ?", ("bob",)).fetchone()
-    revoke_token(db_conn, row["id"])
+    await revoke_token(row["id"])
 
-    tokens = list_tokens(db_conn)
+    tokens = await list_tokens()
     assert len(tokens) == 2
     names = {t["name"] for t in tokens}
     assert names == {"ada", "bob"}

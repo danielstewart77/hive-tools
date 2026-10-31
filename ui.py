@@ -10,6 +10,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+import store
 from auth_api import generate_token, list_tokens, revoke_token
 from auth_session import get_current_user_from_request
 from config import BASE_DIR
@@ -43,14 +44,11 @@ def _infer_method(tool_name: str) -> str:
 
 @router.get("/tools", response_class=HTMLResponse)
 async def tools_page(request: Request) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    rows = db.execute(
-        "SELECT tool_name, mode, sudo_timeout_minutes FROM tool_hitl_settings ORDER BY tool_name"
-    ).fetchall()
+    rows = await store.settings()
     tools = [dict(r) | {"method": _infer_method(r["tool_name"])} for r in rows]
     tools.sort(key=lambda t: (t["tool_name"].split("_")[0], _METHOD_ORDER.get(t["method"], 9), t["tool_name"]))
 
@@ -64,18 +62,11 @@ async def tools_settings_save(
     mode: str = Form(...),
     sudo_timeout_minutes: int = Form(15),
 ) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    db.execute(
-        "INSERT INTO tool_hitl_settings (tool_name, mode, sudo_timeout_minutes) "
-        "VALUES (?, ?, ?) "
-        "ON CONFLICT(tool_name) DO UPDATE SET mode = excluded.mode, sudo_timeout_minutes = excluded.sudo_timeout_minutes",
-        (tool_name, mode, sudo_timeout_minutes),
-    )
-    db.commit()
+    await store.set_setting(tool_name, mode, sudo_timeout_minutes)
     return RedirectResponse(url="/tools", status_code=303)
 
 
@@ -84,12 +75,11 @@ async def tools_settings_save(
 
 @router.get("/tokens", response_class=HTMLResponse)
 async def tokens_page(request: Request) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    tokens = list_tokens(db)
+    tokens = await list_tokens()
     return templates.TemplateResponse(request, "tokens.html", {"user": user, "tokens": tokens})
 
 
@@ -98,13 +88,12 @@ async def tokens_create(
     request: Request,
     name: str = Form(...),
 ) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    raw_token = generate_token(db, name)
-    tokens = list_tokens(db)
+    raw_token = await generate_token(name)
+    tokens = await list_tokens()
     return templates.TemplateResponse(
         request,
         "tokens.html",
@@ -117,12 +106,11 @@ async def tokens_revoke(
     request: Request,
     token_id: int,
 ) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    revoke_token(db, token_id)
+    await revoke_token(token_id)
     return RedirectResponse(url="/tokens", status_code=303)
 
 
@@ -131,15 +119,11 @@ async def tokens_revoke(
 
 @router.get("/hitl-ui", response_class=HTMLResponse)
 async def hitl_page(request: Request) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    rows = db.execute(
-        "SELECT id, tool_name, caller_mind, status, created_at, expires_at, decided_at "
-        "FROM hitl_requests ORDER BY created_at DESC LIMIT 50"
-    ).fetchall()
+    rows = await store.recent_requests()
     requests_list = [dict(r) for r in rows]
     return templates.TemplateResponse(
         request, "hitl.html", {"user": user, "requests": requests_list}
@@ -152,12 +136,11 @@ async def hitl_ui_respond(
     request_id: str,
     action: str = Form(...),
 ) -> Any:
-    user = get_current_user_from_request(request)
+    user = await get_current_user_from_request(request)
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    db = request.app.state.db
-    result = respond_to_hitl(db, request_id, action) or {}
+    result = await respond_to_hitl(request_id, action) or {}
     replay = result.pop("_replay", None)
     if replay:
         asyncio.create_task(_replay_request_async(**replay))

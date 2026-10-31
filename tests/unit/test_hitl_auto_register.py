@@ -22,7 +22,7 @@ def test_hitl_gate_records_tool_name_on_call() -> None:
     assert name in _REGISTERED_TOOLS
 
 
-def test_sync_tool_registry_upserts_with_default_mode_on(
+async def test_sync_tool_registry_upserts_with_default_mode_on(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
@@ -30,7 +30,7 @@ def test_sync_tool_registry_upserts_with_default_mode_on(
     name = "__test_auto_register_default_on"
     hitl_gate(name)
 
-    inserted = sync_tool_registry(db_conn)
+    inserted = await sync_tool_registry()
     assert inserted >= 1  # at least our new tool; other tests may also register
 
     row = db_conn.execute(
@@ -42,14 +42,14 @@ def test_sync_tool_registry_upserts_with_default_mode_on(
     assert row["sudo_timeout_minutes"] == 15
 
 
-def test_sync_tool_registry_does_not_overwrite_user_edits(
+async def test_sync_tool_registry_does_not_overwrite_user_edits(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
     name = "__test_auto_register_user_edit_preserved"
     hitl_gate(name)
-    sync_tool_registry(db_conn)
+    await sync_tool_registry()
 
     # Simulate Daniel switching this tool to sudo mode in the control panel.
     db_conn.execute(
@@ -59,7 +59,7 @@ def test_sync_tool_registry_does_not_overwrite_user_edits(
     )
     db_conn.commit()
 
-    inserted = sync_tool_registry(db_conn)
+    inserted = await sync_tool_registry()
     # Second sync may insert nothing for this tool; if other test funcs ran
     # and registered new names this could be > 0 — that's fine.
     assert inserted >= 0
@@ -72,18 +72,18 @@ def test_sync_tool_registry_does_not_overwrite_user_edits(
     assert row["sudo_timeout_minutes"] == 60
 
 
-def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection) -> None:
+async def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection) -> None:
     """Manual seed in db.py sets read endpoints to 'off'. Auto-register
     must not flip them to 'on'."""
     from db import seed_default_hitl_settings
     from hitl import hitl_gate, sync_tool_registry
 
-    seed_default_hitl_settings(db_conn)
+    await seed_default_hitl_settings()
 
     # Simulate the tools/gmail.py import declaring the gate with the same
     # tool_name that the manual seed already set to 'off'.
     hitl_gate("gmail_read_emails")
-    sync_tool_registry(db_conn)
+    await sync_tool_registry()
 
     row = db_conn.execute(
         "SELECT mode FROM tool_hitl_settings WHERE tool_name = 'gmail_read_emails'"
@@ -91,7 +91,7 @@ def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection) -> No
     assert row["mode"] == "off"
 
 
-def test_sync_returns_zero_when_all_tools_already_present(
+async def test_sync_returns_zero_when_all_tools_already_present(
     db_conn: sqlite3.Connection,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
@@ -99,8 +99,8 @@ def test_sync_returns_zero_when_all_tools_already_present(
     name = "__test_auto_register_idempotent"
     hitl_gate(name)
 
-    sync_tool_registry(db_conn)
-    second_pass_inserted = sync_tool_registry(db_conn)
+    await sync_tool_registry()
+    second_pass_inserted = await sync_tool_registry()
 
     # No new rows on the second sync for this specific tool.
     row = db_conn.execute(

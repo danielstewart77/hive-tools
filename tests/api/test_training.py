@@ -8,6 +8,9 @@ rather than a stack trace, and launching a fine-tune is never the default.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Generator
+
 import json
 import subprocess
 from pathlib import Path
@@ -16,6 +19,8 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+import store
 
 
 @pytest.fixture()
@@ -26,20 +31,24 @@ def app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture()
-def client(app: FastAPI) -> TestClient:
-    return TestClient(app)
+def client(app: FastAPI) -> Generator[TestClient, None, None]:
+    # Entered, not merely constructed: the store opens in the app's
+    # lifespan, and a client that never enters it is an app whose database
+    # was never opened.
+    with TestClient(app) as entered:
+        yield entered
 
 
 @pytest.fixture()
-def auth_headers(app: FastAPI) -> dict[str, str]:
+def auth_headers(client: TestClient) -> dict[str, str]:
     from auth_api import generate_token
 
-    raw = generate_token(app.state.db, "ada")
+    raw = asyncio.run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
 @pytest.fixture(autouse=True)
-def hitl_off(app: FastAPI):
+def hitl_off(client: TestClient):
     """Pin the gate open regardless of what the seed defaults happen to be.
 
     Production seeds these off, since the console's login is already the
@@ -53,11 +62,7 @@ def hitl_off(app: FastAPI):
         "training_train",
         "training_deploy",
     ):
-        app.state.db.execute(
-            "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
-            (tool, "off"),
-        )
-    app.state.db.commit()
+        asyncio.run(store.set_setting(tool, "off", 15))
 
 
 @pytest.fixture()
