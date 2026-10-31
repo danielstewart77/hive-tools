@@ -21,6 +21,19 @@ router = APIRouter(prefix="/docker", tags=["docker"])
 MUTATE_BLOCKED = {"hive_mind_mcp", "hive-tools"}
 
 
+class BlockedProjectError(Exception):
+    """Raised for a mutating operation on a project that may not be mutated.
+
+    A class, because `server.py` has had a handler for this name since
+    before the name existed: the import was wrapped in `except ImportError:
+    pass`, so the handler was silently never registered and the one refusal
+    it was written to shape has been answering `500 Internal Server Error`
+    ever since. `docker compose up` on hive-tools' own directory is the
+    service restarting itself mid-request, which is a refusal and not a
+    fault.
+    """
+
+
 def _run_subprocess(
     cmd: list[str], cwd: str, env: dict[str, str] | None = None, timeout: int = 120
 ) -> tuple[int, str, str]:
@@ -73,7 +86,10 @@ def docker_mutate_gate(tool_name: str):
         if caller_mind == "internal":
             return caller_mind
         if os.path.basename(path.rstrip("/")) in MUTATE_BLOCKED:
-            raise ValueError(f"Mutating operations on '{path}' are blocked.")
+            raise BlockedProjectError(
+                f"Mutating operations on '{path}' are blocked. This project "
+                "runs the service handling the request, so composing it "
+                "down or up from here would end the request that asked.")
         body_bytes = await request.body()
         qs = str(request.query_params)
         tool_path = f"{request.url.path}?{qs}" if qs else request.url.path
