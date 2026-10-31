@@ -109,3 +109,60 @@ def test_docker_list_networks_returns_array(
     assert resp.status_code == 200
     data = resp.json()
     assert "networks" in data
+
+
+def test_a_gated_call_whose_body_cannot_be_stored_is_refused(
+    app: FastAPI,
+    client: TestClient,
+    auth_header: dict[str, str],
+    tmp_path,
+) -> None:
+    """A NUL byte is valid UTF-8, so `errors="replace"` leaves it alone.
+    SQLite stored it and Postgres refuses it outright, so the same gated call
+    was queued on one store and 500ed on the other with no approval row and
+    no notification. Refused here instead, because a body stored with the NUL
+    taken out would replay a different call than the one approved."""
+    db = app.state.db
+    db.execute(
+        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) "
+        "VALUES (?, ?)", ("docker_compose_up", "on"))
+    db.commit()
+
+    resp = client.post(
+        f"/docker/up?path={tmp_path}",
+        content=b'{"service": "a\x00b"}',
+        headers={**auth_header, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 400
+    assert "NUL" in resp.json()["error"]
+    # Nothing queued, so nothing is waiting on a person for a call that
+    # cannot be replayed.
+    assert db.execute(
+        "SELECT count(*) AS c FROM hitl_requests").fetchone()["c"] == 0
+
+
+def test_a_body_with_invalid_utf8_is_still_queued(
+    app: FastAPI,
+    client: TestClient,
+    auth_header: dict[str, str],
+    tmp_path,
+) -> None:
+    """Only the NUL is refused. Invalid UTF-8 has always been captured with
+    the replacement character and is still gated, so the refusal is as narrow
+    as the thing the database cannot hold."""
+    db = app.state.db
+    db.execute(
+        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) "
+        "VALUES (?, ?)", ("docker_compose_up", "on"))
+    db.commit()
+
+    resp = client.post(
+        f"/docker/up?path={tmp_path}",
+        content=b'{"service": "\xff\xfe"}',
+        headers={**auth_header, "Content-Type": "application/json"},
+    )
+
+    assert resp.status_code == 202
+    assert db.execute(
+        "SELECT count(*) AS c FROM hitl_requests").fetchone()["c"] == 1

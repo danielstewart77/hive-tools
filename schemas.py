@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -42,7 +44,12 @@ class HITLStatusResponse(BaseModel):
 
 
 class HITLRespondRequest(BaseModel):
-    action: str
+    #: Declared rather than `str`. An unrecognised action used to be taken as
+    #: a denial, so `{"action": "approved"}` - the natural past-tense mistake
+    #: - denied the request irrevocably and answered 200 saying `denied`.
+    #: Refused by the model is better than refused by the route, because the
+    #: body never reaches the decision at all.
+    action: Literal["approve", "deny"]
 
 
 # --- Tool Settings ---

@@ -23,6 +23,8 @@ import store
 from config import BASE_DIR, DB_PATH
 from hitl import (
     HITLPendingException,
+    UncapturableCall,
+    UnknownAction,
     _replay_request_async,
     get_hitl_status,
     respond_to_hitl,
@@ -34,6 +36,24 @@ from schemas import HITLRespondRequest
 log = configure_logging("hive-tools")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def _already_seeded(exc: BaseException) -> bool:
+    """Whether a failed admin seed failed because the admin already exists.
+
+    Matched on the class names rather than imported, because which of them
+    can be raised depends on which store answered - `hive_data.Conflict` on
+    Postgres, `sqlite3.IntegrityError` on the file - and importing
+    `hive_data` here would make the Postgres package a hard dependency of
+    the SQLite path.
+    """
+    for cause in (exc, exc.__cause__, exc.__context__):
+        if cause is None:
+            continue
+        if type(cause).__name__ in ("Conflict", "IntegrityError",
+                                    "UniqueViolationError"):
+            return True
+    return False
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -64,9 +84,20 @@ def create_app(db_path: str | None = None) -> FastAPI:
             import os
 
             bootstrap_password = os.getenv("HT_ADMIN_PASSWORD", "changeme")
-            await create_user("admin", bootstrap_password, is_admin=True)
-            log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var no "
-                     "longer needed after this boot)")
+            try:
+                await create_user("admin", bootstrap_password, is_admin=True)
+            except Exception as exc:
+                # A read, a check and a write. The database is shared now, so
+                # an overlapping redeploy or a second process on this schema
+                # can seed between the two - and a uniqueness conflict raised
+                # here is a crash loop rather than a boot, over a user that
+                # exists. Anything else still raises.
+                if not _already_seeded(exc):
+                    raise
+                log.info("Admin user was already seeded by another process")
+            else:
+                log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var "
+                         "no longer needed after this boot)")
 
         from db import seed_default_hitl_settings
 
@@ -160,7 +191,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
         body: HITLRespondRequest,
         caller: str = Depends(require_api_token),
     ) -> Any:
-        result = await respond_to_hitl(request_id, body.action)
+        try:
+            result = await respond_to_hitl(request_id, body.action)
+        except UnknownAction as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         if result is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
         if "error" in result and result["error"] == "already_resolved":
@@ -191,6 +225,19 @@ def create_app(db_path: str | None = None) -> FastAPI:
             {"hitl_request_id": exc.request_id, "status": "pending"},
             status_code=202,
         )
+
+    @app.exception_handler(UncapturableCall)
+    async def uncapturable_call_handler(
+        request: Request, exc: UncapturableCall,
+    ) -> JSONResponse:
+        """A gated call whose body cannot be stored as the call it was.
+
+        400 and not 500: the fault is in what arrived, and the sentence says
+        what about it. Before this it was an unhandled `ValueRefused` from
+        the database driver - an opaque 500, with no approval queued and no
+        notification sent, so the gated call simply failed.
+        """
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
     try:
         from tools.docker_ops import BlockedProjectError

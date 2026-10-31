@@ -3,6 +3,10 @@
 {% block content %}
 <h1>API Tokens</h1>
 
+{% if notice %}
+<div class="notice">{{ notice }}</div>
+{% endif %}
+
 {% if new_token %}
 <div style="background: #d4edda; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
     <strong>New token for {{ new_token_name }}:</strong><br>
