@@ -166,3 +166,21 @@ def test_a_body_with_invalid_utf8_is_still_queued(
     assert resp.status_code == 202
     assert db.execute(
         "SELECT count(*) AS c FROM hitl_requests").fetchone()["c"] == 1
+
+
+def test_mutating_a_blocked_project_is_refused_not_a_fault(
+    client: TestClient,
+    auth_header: dict[str, str],
+) -> None:
+    """`docker compose up` on hive-tools' own directory is the service
+    restarting itself mid-request. It answered `500 Internal Server Error`,
+    because the handler written for it imported a class that did not exist
+    and the import sat inside `except ImportError: pass` - so the handler was
+    silently never registered."""
+    resp = client.post(
+        "/docker/up?path=/srv/hive-tools",
+        headers=auth_header,
+    )
+
+    assert resp.status_code == 403
+    assert "blocked" in resp.json()["error"]

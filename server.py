@@ -32,6 +32,7 @@ from hitl import (
 )
 from hive_logging import configure_logging, install_fastapi_logging, log_event
 from schemas import HITLRespondRequest
+from tools.docker_ops import BlockedProjectError
 
 log = configure_logging("hive-tools")
 
@@ -239,14 +240,24 @@ def create_app(db_path: str | None = None) -> FastAPI:
         """
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    try:
-        from tools.docker_ops import BlockedProjectError
+    @app.exception_handler(BlockedProjectError)
+    async def blocked_project_handler(
+        request: Request, exc: BlockedProjectError,
+    ) -> JSONResponse:
+        """A mutating operation on a project that may not be mutated.
 
-        @app.exception_handler(BlockedProjectError)
-        async def blocked_project_handler(request: Request, exc: BlockedProjectError) -> JSONResponse:
-            return JSONResponse({"error": str(exc)}, status_code=200)
-    except ImportError:
-        pass
+        403, because the caller authenticated fine and is not allowed to do
+        this - and not 500, which is what it answered while the handler's
+        own import sat inside `except ImportError: pass` against a class
+        that did not exist. Not 200 either, which is what that handler said:
+        a refusal reported as a success is a caller that believes its
+        `compose up` ran.
+
+        Registered directly rather than behind a swallowed import. The
+        router includes below are optional and belong in a `try`; an
+        exception class this application's own code raises is not.
+        """
+        return JSONResponse({"error": str(exc)}, status_code=403)
 
     # Include tool routers
     try:
