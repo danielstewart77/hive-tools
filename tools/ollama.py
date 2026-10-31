@@ -40,10 +40,6 @@ router = APIRouter(prefix="/ollama", tags=["ollama"])
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_DEFAULT_MODEL = os.environ.get("OLLAMA_DEFAULT_MODEL", "gpt-oss:20b-32k")
 OLLAMA_TIMEOUT_SECONDS = 90
-# A decision model is loaded cold on the first call of a pass -- most of a
-# minute on a 27b -- and a batch of shapes is one call. The chat timeout
-# would abort the pass that warms it.
-SYSTEMONE_TIMEOUT_SECONDS = 600
 
 
 class StructuredRequest(BaseModel):
@@ -85,54 +81,6 @@ async def _ollama_chat(
             resp.raise_for_status()
     except httpx.HTTPError as e:
         log.exception("Ollama call failed")
-        raise HTTPException(status_code=502, detail=f"ollama call failed: {e}") from e
-    return resp.json()
-
-
-class SystemOneRequest(BaseModel):
-    """One decision-model call: a state, and named questions about it.
-
-    Relayed rather than composed. The caller owns the question -- the sensor
-    builds it from the bucket catalogue its own store holds -- and this route
-    exists because Ollama binds loopback on purpose, so a machine that is not
-    this one has no other way to reach the decision model.
-    """
-
-    state: dict[str, Any]
-    questions: dict[str, Any]
-    model: str | None = None
-    keep_alive: str | None = None
-
-
-@router.post("/systemone")
-async def systemone(
-    body: SystemOneRequest,
-    caller: str = Depends(require_api_token),
-) -> dict[str, Any]:
-    """Relay a decision-model call to Ollama's `/v1/systemone`, verbatim.
-
-    No HITL gate and no default model: a decision model is read-only
-    inference on a log line, and a caller whose model is substituted for a
-    house favourite gets placements nobody can account for.
-    """
-    del caller
-    if not body.model:
-        raise HTTPException(status_code=400, detail="model is required")
-    if not body.questions:
-        raise HTTPException(status_code=400, detail="at least one question is required")
-    payload: dict[str, Any] = {
-        "model": body.model,
-        "state": body.state,
-        "questions": body.questions,
-    }
-    if body.keep_alive is not None:
-        payload["keep_alive"] = body.keep_alive
-    try:
-        async with httpx.AsyncClient(timeout=SYSTEMONE_TIMEOUT_SECONDS) as client:
-            resp = await client.post(f"{OLLAMA_BASE_URL}/v1/systemone", json=payload)
-            resp.raise_for_status()
-    except httpx.HTTPError as e:
-        log.exception("Ollama systemone call failed")
         raise HTTPException(status_code=502, detail=f"ollama call failed: {e}") from e
     return resp.json()
 
