@@ -89,6 +89,31 @@ async def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None
     assert row_after["revoked_at"] is not None
 
 
+async def test_revoking_an_already_revoked_token_answers_false(
+    db_conn: sqlite3.Connection,
+) -> None:
+    """The count is the arbitration. A caller told it succeeded twice cannot
+    tell a revocation it performed from one it merely repeated - and the
+    operator's page says the token is gone either way, which is the sentence
+    that matters when the guard is missing and the bearer keeps working."""
+    from auth_api import generate_token, revoke_token
+
+    await generate_token("ada")
+    token_id = db_conn.execute(
+        "SELECT id FROM api_tokens WHERE name = ?", ("ada",)).fetchone()["id"]
+
+    assert await revoke_token(token_id) is True
+    first = db_conn.execute(
+        "SELECT revoked_at FROM api_tokens WHERE id = ?", (token_id,)
+    ).fetchone()["revoked_at"]
+
+    assert await revoke_token(token_id) is False
+    # And the second attempt did not move the moment it was revoked at.
+    assert db_conn.execute(
+        "SELECT revoked_at FROM api_tokens WHERE id = ?", (token_id,)
+    ).fetchone()["revoked_at"] == first
+
+
 async def test_list_tokens_returns_all(db_conn: sqlite3.Connection) -> None:
     from auth_api import generate_token, list_tokens, revoke_token
 

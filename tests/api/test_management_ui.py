@@ -153,3 +153,89 @@ def test_hitl_page_approve_button_works(
         "SELECT status FROM hitl_requests WHERE id = ?", (request_id,)
     ).fetchone()
     assert row["status"] == "approved"
+
+
+def _queued(db, request_id: str, *, expires_in: int = 300,
+            body: str = '{"path": "/opt/thing"}') -> None:
+    now = int(time.time())
+    db.execute(
+        "INSERT INTO hitl_requests (id, tool_name, caller_mind, params_json, "
+        "tool_method, tool_path, tool_body, status, created_at, expires_at) "
+        "VALUES (?, 'docker_compose_up', 'skippy', '{}', 'POST', "
+        "'/docker/up', ?, 'pending', ?, ?)",
+        (request_id, body, now, now + expires_in))
+    db.commit()
+
+
+def test_the_queue_draws_an_expired_request_as_expired(
+    app: FastAPI, authed_client: TestClient
+) -> None:
+    """Nothing ever writes `expired` to a row - the expiry is a rule applied
+    when a row is read, and this page had no copy of it. Eleven requests on
+    the live queue were drawn as pending with working Approve and Deny
+    buttons, one of them ninety-six days past its expiry."""
+    stale = str(uuid.uuid4())
+    live = str(uuid.uuid4())
+    _queued(app.state.db, stale, expires_in=-1)
+    _queued(app.state.db, live)
+
+    page = authed_client.get("/hitl-ui").text
+    rows = {row.split("</tr>")[0] for row in page.split("<tr>")[1:]}
+    stale_row = next(row for row in rows if stale in row)
+    live_row = next(row for row in rows if live in row)
+
+    assert "expired" in stale_row
+    assert "Approve" not in stale_row
+    assert "Approve" in live_row
+
+
+def test_deciding_an_expired_request_says_so_on_the_page(
+    app: FastAPI, authed_client: TestClient
+) -> None:
+    """The one caller a human uses was the one that discarded the answer:
+    clicking Approve on a request that had expired reloaded the page, changed
+    nothing, and said nothing."""
+    stale = str(uuid.uuid4())
+    _queued(app.state.db, stale, expires_in=-1)
+
+    resp = authed_client.post(f"/hitl-ui/{stale}/respond",
+                              data={"action": "approve"})
+    assert resp.status_code == 303
+    followed = authed_client.get(resp.headers["location"]).text
+    assert "expired" in followed
+
+    assert app.state.db.execute(
+        "SELECT status FROM hitl_requests WHERE id = ?", (stale,)
+    ).fetchone()["status"] == "pending"
+
+
+def test_deciding_a_settled_request_says_who_got_there_first(
+    app: FastAPI, authed_client: TestClient
+) -> None:
+    settled = str(uuid.uuid4())
+    _queued(app.state.db, settled)
+
+    authed_client.post(f"/hitl-ui/{settled}/respond", data={"action": "deny"})
+    resp = authed_client.post(f"/hitl-ui/{settled}/respond",
+                              data={"action": "approve"})
+    followed = authed_client.get(resp.headers["location"]).text
+    assert "already denied" in followed
+
+
+def test_revoking_a_token_twice_says_nothing_changed(
+    app: FastAPI, authed_client: TestClient
+) -> None:
+    """The count the revocation reports, which this route used to throw
+    away - so the operator could not tell a revocation they performed from
+    one they merely repeated."""
+    asyncio.run(generate_token("ada"))
+    token_id = app.state.db.execute(
+        "SELECT id FROM api_tokens WHERE name = 'ada'").fetchone()["id"]
+
+    first = authed_client.post(f"/tokens/{token_id}/revoke")
+    assert "Token revoked." in authed_client.get(
+        first.headers["location"]).text
+
+    again = authed_client.post(f"/tokens/{token_id}/revoke")
+    assert "already revoked" in authed_client.get(
+        again.headers["location"]).text

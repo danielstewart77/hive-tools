@@ -12,6 +12,27 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _on_this_host_s_own_file() -> Generator[None, None, None]:
+    """Keep the suite on the SQLite half, whatever this host is pointed at.
+
+    `store.open` picks its backend from `HIVE_DATABASE_URL`, and on the
+    machine that runs the service that variable is exported - so the whole
+    suite silently ran against the hive's Postgres, every fixture that calls
+    `asyncio.run` inside a `TestClient` block crossed event loops, and
+    `db_conn`'s `assert connection is not None` failed outright. A suite
+    whose backend depends on the shell it was started from is a suite whose
+    result means nothing.
+
+    The Postgres half is covered on purpose elsewhere: `hive_data`'s own
+    suite exercises every `tools` operation against a real Postgres, and
+    `tests/test_store_parity.py` here runs the two halves side by side and
+    compares what they answer.
+    """
+    with patch.dict(os.environ, {"HIVE_DATABASE_URL": ""}):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _block_outbound_telegram() -> Generator[None, None, None]:
     """Keep HITL approval prompts inside the test run.
 

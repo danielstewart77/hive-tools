@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+import urllib.parse
 from typing import Any
 
 import asyncio
@@ -14,7 +16,12 @@ import store
 from auth_api import generate_token, list_tokens, revoke_token
 from auth_session import get_current_user_from_request
 from config import BASE_DIR
-from hitl import _replay_request_async, respond_to_hitl
+from hitl import (
+    UnknownAction,
+    _replay_request_async,
+    effective_status,
+    respond_to_hitl,
+)
 
 router = APIRouter()
 
@@ -80,7 +87,10 @@ async def tokens_page(request: Request) -> Any:
         return RedirectResponse(url="/login", status_code=303)
 
     tokens = await list_tokens()
-    return templates.TemplateResponse(request, "tokens.html", {"user": user, "tokens": tokens})
+    return templates.TemplateResponse(
+        request, "tokens.html",
+        {"user": user, "tokens": tokens,
+         "notice": request.query_params.get("notice") or ""})
 
 
 @router.post("/tokens/create", response_class=HTMLResponse)
@@ -110,8 +120,14 @@ async def tokens_revoke(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    await revoke_token(token_id)
-    return RedirectResponse(url="/tokens", status_code=303)
+    # The count, which the revocation was changed to report and this route
+    # used to throw away - so the operator could not tell a revocation they
+    # performed from one they merely repeated.
+    revoked = await revoke_token(token_id)
+    notice = ("Token revoked." if revoked
+              else "That token was already revoked; nothing changed.")
+    return RedirectResponse(
+        url=f"/tokens?notice={urllib.parse.quote(notice)}", status_code=303)
 
 
 # ---- HITL UI ----
@@ -123,10 +139,18 @@ async def hitl_page(request: Request) -> Any:
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    rows = await store.recent_requests()
-    requests_list = [dict(r) for r in rows]
+    # The status the page draws is the status at this instant, not the one in
+    # the column: nothing ever writes `expired`, the expiry is a rule applied
+    # when a row is read, and this page had no copy of that rule. Eleven
+    # requests on the live queue were being drawn as pending with working
+    # Approve and Deny buttons, one of them ninety-six days past its expiry.
+    now = int(time.time())
+    requests_list = [dict(r) | {"status": effective_status(dict(r), now)}
+                     for r in await store.recent_requests()]
     return templates.TemplateResponse(
-        request, "hitl.html", {"user": user, "requests": requests_list}
+        request, "hitl.html",
+        {"user": user, "requests": requests_list,
+         "notice": request.query_params.get("notice") or ""},
     )
 
 
@@ -140,8 +164,34 @@ async def hitl_ui_respond(
     if not user:
         return RedirectResponse(url="/login", status_code=303)
 
-    result = await respond_to_hitl(request_id, action) or {}
+    # What the decision answered, carried back to the page. The one caller a
+    # human uses was the one that discarded it: clicking Approve on a request
+    # that had expired, or that somebody else had just decided, reloaded the
+    # page, changed nothing, and said nothing.
+    try:
+        result = await respond_to_hitl(request_id, action) or {}
+    except UnknownAction as exc:
+        return _back_to_queue(str(exc))
+
+    if not result:
+        return _back_to_queue(f"There is no request {request_id}.")
+    if result.get("error") == "already_resolved":
+        settled = result.get("current_status")
+        if settled == "expired":
+            return _back_to_queue(
+                "That request expired before this decision reached it, so "
+                "nothing changed. The call has to be made again rather than "
+                "approved.")
+        return _back_to_queue(
+            f"That request was already {settled}, so nothing changed.")
+
     replay = result.pop("_replay", None)
     if replay:
         asyncio.create_task(_replay_request_async(**replay))
-    return RedirectResponse(url="/hitl-ui", status_code=303)
+    return _back_to_queue(f"Request {result['status']}.")
+
+
+def _back_to_queue(notice: str) -> RedirectResponse:
+    """The queue again, carrying one sentence about what just happened."""
+    return RedirectResponse(
+        url=f"/hitl-ui?notice={urllib.parse.quote(notice)}", status_code=303)

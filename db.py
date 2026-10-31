@@ -16,7 +16,15 @@ def init_db(db_path: str | None = None) -> sqlite3.Connection:
     path = Path(db_path or DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    # `isolation_level=None` - the store drives its own transactions.
+    # Python's sqlite3 otherwise opens one implicitly before a write and
+    # closes it on `commit()`, which fights an explicit `BEGIN IMMEDIATE`:
+    # the module's own bookkeeping loses track and the matching `COMMIT`
+    # fails with "cannot commit - no transaction is active". Every statement
+    # outside an explicit transaction autocommits, which is what the store's
+    # single-statement operations want anyway.
+    conn = sqlite3.connect(str(path), check_same_thread=False,
+                           isolation_level=None)
     conn.row_factory = sqlite3.Row
 
     conn.executescript(

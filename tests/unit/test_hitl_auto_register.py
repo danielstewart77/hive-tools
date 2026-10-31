@@ -9,8 +9,24 @@ already registered via the normal import path (gmail, calendar, etc.).
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture()
+def only_these_tools() -> Iterator[object]:
+    """Register tools against a registry of this test's own.
+
+    `_REGISTERED_TOOLS` is module-global and every gated route in the repo
+    adds to it at import time, so the count `sync_tool_registry` returns was
+    being asserted as `>= 0` - true of every value the function can
+    return, which is to say not asserted at all. Replacing the registry
+    makes the count exact, which is what the one caller reads it for.
+    """
+    with patch("hitl._REGISTERED_TOOLS", set()) as registry:
+        yield registry
 
 
 def test_hitl_gate_records_tool_name_on_call() -> None:
@@ -23,15 +39,14 @@ def test_hitl_gate_records_tool_name_on_call() -> None:
 
 
 async def test_sync_tool_registry_upserts_with_default_mode_on(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
     name = "__test_auto_register_default_on"
     hitl_gate(name)
 
-    inserted = await sync_tool_registry()
-    assert inserted >= 1  # at least our new tool; other tests may also register
+    assert await sync_tool_registry() == 1
 
     row = db_conn.execute(
         "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
@@ -43,7 +58,7 @@ async def test_sync_tool_registry_upserts_with_default_mode_on(
 
 
 async def test_sync_tool_registry_does_not_overwrite_user_edits(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
@@ -59,10 +74,10 @@ async def test_sync_tool_registry_does_not_overwrite_user_edits(
     )
     db_conn.commit()
 
-    inserted = await sync_tool_registry()
-    # Second sync may insert nothing for this tool; if other test funcs ran
-    # and registered new names this could be > 0 — that's fine.
-    assert inserted >= 0
+    # Nothing new on the second pass, because the tool already has a row -
+    # and the edit above has to survive it, which is the whole reason the
+    # seed is insert-if-absent.
+    assert await sync_tool_registry() == 0
 
     row = db_conn.execute(
         "SELECT mode, sudo_timeout_minutes FROM tool_hitl_settings WHERE tool_name = ?",
@@ -72,7 +87,9 @@ async def test_sync_tool_registry_does_not_overwrite_user_edits(
     assert row["sudo_timeout_minutes"] == 60
 
 
-async def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection) -> None:
+async def test_sync_preserves_manual_seed_off_modes(
+    db_conn: sqlite3.Connection, only_these_tools: object,
+) -> None:
     """Manual seed in db.py sets read endpoints to 'off'. Auto-register
     must not flip them to 'on'."""
     from db import seed_default_hitl_settings
@@ -92,22 +109,17 @@ async def test_sync_preserves_manual_seed_off_modes(db_conn: sqlite3.Connection)
 
 
 async def test_sync_returns_zero_when_all_tools_already_present(
-    db_conn: sqlite3.Connection,
+    db_conn: sqlite3.Connection, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
     name = "__test_auto_register_idempotent"
     hitl_gate(name)
 
-    await sync_tool_registry()
-    second_pass_inserted = await sync_tool_registry()
+    assert await sync_tool_registry() == 1
+    assert await sync_tool_registry() == 0
 
-    # No new rows on the second sync for this specific tool.
     row = db_conn.execute(
         "SELECT mode FROM tool_hitl_settings WHERE tool_name = ?", (name,)
     ).fetchone()
     assert row is not None
-    # Second pass may still insert other tools registered in parallel tests;
-    # the meaningful assertion is that this row exists and the function is
-    # safe to call repeatedly.
-    assert second_pass_inserted >= 0

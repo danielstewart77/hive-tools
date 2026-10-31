@@ -3,6 +3,10 @@
 {% block head %}<meta http-equiv="refresh" content="5">{% endblock %}
 {% block content %}
 <h1>HITL Approval Requests</h1>
+
+{% if notice %}
+<div class="notice">{{ notice }}</div>
+{% endif %}
 <table>
     <thead>
         <tr>

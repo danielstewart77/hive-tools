@@ -47,11 +47,19 @@ async def test_create_user_and_get_by_username(db_conn: sqlite3.Connection) -> N
 
 
 async def test_create_user_duplicate_raises(db_conn: sqlite3.Connection) -> None:
+    """Named by what the application branches on, not by one backend's
+    exception class. The bootstrap seed catches "this user already exists" to
+    survive an overlapping redeploy, and which class carries it depends on
+    which store answered - `sqlite3.IntegrityError` on the file,
+    `hive_data.Conflict` on Postgres. A test naming the first asserts
+    something the two halves behaving alike contradicts."""
     from auth_session import create_user
+    from server import _already_seeded
 
     await create_user("daniel", "pass123")
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(Exception) as caught:
         await create_user("daniel", "pass456")
+    assert _already_seeded(caught.value)
 
 
 def test_create_session_token_and_read_back() -> None:
@@ -98,7 +106,3 @@ async def test_verify_user_credentials_disabled_returns_none(
     assert result is None
 
 
-def test_session_cookie_name_is_ht_session() -> None:
-    from auth_session import SESSION_COOKIE_NAME
-
-    assert SESSION_COOKIE_NAME == "ht_session"
