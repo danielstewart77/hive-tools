@@ -3,33 +3,45 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from tests import scratch
+
+
+@pytest.fixture(scope="session")
+def scratch_database():
+    """One scratch database for the run, claimed, with the schemas applied.
+
+    Fails rather than skips without a server: a suite that skipped every
+    test would read as green while testing nothing.
+    """
+    if not scratch.ADMIN_DSN:
+        pytest.fail(scratch.NO_SERVER)
+    with scratch.testclients_on_the_suite_loop():
+        database = scratch.run(scratch.ScratchDatabase.create())
+        try:
+            yield database
+        finally:
+            scratch.run(database.close())
+            scratch.stop_suite_portal()
+
 
 @pytest.fixture(autouse=True)
-def _on_this_host_s_own_file() -> Generator[None, None, None]:
-    """Keep the suite on the SQLite half, whatever this host is pointed at.
+def _on_the_scratch_database(scratch_database, monkeypatch):
+    """Every test on an emptied scratch database.
 
-    `store.open` picks its backend from `HIVE_DATABASE_URL`, and on the
-    machine that runs the service that variable is exported - so the whole
-    suite silently ran against the hive's Postgres, every fixture that calls
-    `asyncio.run` inside a `TestClient` block crossed event loops, and
-    `db_conn`'s `assert connection is not None` failed outright. A suite
-    whose backend depends on the shell it was started from is a suite whose
-    result means nothing.
-
-    The Postgres half is covered on purpose elsewhere: `hive_data`'s own
-    suite exercises every `tools` operation against a real Postgres, and
-    `tests/test_store_parity.py` here runs the two halves side by side and
-    compares what they answer.
+    `HIVE_DATABASE_URL` is pointed at it here, whatever this host exports:
+    on the machine that runs the service that variable names the live
+    database, and a suite that inherited it would edit production and report
+    green.
     """
-    with patch.dict(os.environ, {"HIVE_DATABASE_URL": ""}):
-        yield
+    monkeypatch.setenv("HIVE_DATABASE_URL", scratch_database.dsn)
+    scratch.run(scratch_database.reset())
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -82,41 +94,30 @@ def _no_real_docker_from_the_gpu_arbiter(tmp_path: Path) -> Generator[None, None
 
 
 @pytest.fixture()
-def tmp_db(tmp_path: Path) -> Path:
-    """Return a temporary database path (file does not exist yet)."""
-    return tmp_path / "test.db"
+def db_conn() -> Generator[scratch.RawSQL, None, None]:
+    """Open the store and hand back raw SQL against the same database.
 
-
-@pytest.fixture()
-def db_conn(tmp_db: Path) -> Generator[sqlite3.Connection, None, None]:
-    """Open the store on a temporary database and hand back its connection.
-
-    The operations are module-level and async now, so a unit test needs the
-    store open rather than a connection of its own. The connection yielded
-    is the one the store is using, so a test that sets up a row directly
-    cannot set up state the operations would not see.
+    The operations are module-level and async, so a unit test needs the
+    store open. What is yielded reads and writes the database directly, so
+    a test can set up a row the operations will see and read back what they
+    wrote.
     """
-    import asyncio
-
     import store
 
-    asyncio.run(store.open(str(tmp_db)))
-    connection = store.sqlite_connection()
-    assert connection is not None
+    scratch.run(store.open())
     try:
-        yield connection
+        yield scratch.db
     finally:
-        asyncio.run(store.close())
+        scratch.run(store.close())
 
 
 def pytest_pyfunc_call(pyfuncitem):
-    """Run coroutine tests without pulling in a plugin for it.
+    """Run coroutine tests on the suite's loop, without a plugin for it.
 
     The suite is otherwise synchronous, and one async module is not worth a
     dependency whose default event-loop scoping would then apply to every
-    test in the repo.
+    test in the repo. The loop is the one the store's pool belongs to.
     """
-    import asyncio
     import inspect
 
     func = pyfuncitem.obj
@@ -127,5 +128,5 @@ def pytest_pyfunc_call(pyfuncitem):
         for name in pyfuncitem._fixtureinfo.argnames
         if name in pyfuncitem.funcargs
     }
-    asyncio.run(func(**kwargs))
+    scratch.run(func(**kwargs))
     return True

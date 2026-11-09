@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -10,13 +9,14 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.scratch import run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -38,17 +38,16 @@ def test_starting_the_app_opens_its_store(app: FastAPI) -> None:
     """Nothing opens a database while the app is being built, so the lifespan
     is the only thing that can. An operation reached before start says so
     rather than connecting on demand behind somebody's back."""
-    import asyncio
 
     import store
 
     with pytest.raises(RuntimeError):
-        asyncio.run(store.count_users())
+        run(store.count_users())
 
     with TestClient(app):
         # The bootstrap admin is seeded at start, so a read answering at all
         # is the store being open and a count of one is the seed having run.
-        assert asyncio.run(store.count_users()) == 1
+        assert run(store.count_users()) == 1
 
     with pytest.raises(RuntimeError):
-        asyncio.run(store.count_users())
+        run(store.count_users())

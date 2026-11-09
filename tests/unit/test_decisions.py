@@ -9,7 +9,6 @@ minutes to seconds each left the suite entirely green.
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from unittest.mock import patch
 
@@ -17,9 +16,10 @@ import pytest
 
 import store
 from hitl import UnknownAction, respond_to_hitl
+from tests.scratch import RawSQL
 
 
-def _pending(db_conn: sqlite3.Connection, request_id: str, *,
+def _pending(db_conn: RawSQL, request_id: str, *,
              tool: str = "docker_compose_up", expires_in: int = 300,
              body: str = '{"path": "/opt/thing"}') -> int:
     """A request waiting on a person, with the call it captured."""
@@ -34,7 +34,7 @@ def _pending(db_conn: sqlite3.Connection, request_id: str, *,
     return now
 
 
-def _mode(db_conn: sqlite3.Connection, tool: str, mode: str,
+def _mode(db_conn: RawSQL, tool: str, mode: str,
           timeout_minutes: int = 15) -> None:
     db_conn.execute(
         "INSERT INTO tool_hitl_settings (tool_name, mode, "
@@ -44,7 +44,7 @@ def _mode(db_conn: sqlite3.Connection, tool: str, mode: str,
 
 
 async def test_a_request_past_its_expiry_cannot_be_approved(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """The expiry is half the decision's guard and had no test on this half.
     Approving a stale request would both mint the sudo grant and fire the
     replay - running a call whose approval window closed days ago."""
@@ -62,7 +62,7 @@ async def test_a_request_past_its_expiry_cannot_be_approved(
 
 
 async def test_the_three_reasons_a_decision_loses_are_told_apart(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """They have different remedies. No such request means the id is wrong;
     already settled means somebody else got there first; expired means the
     call has to be made again rather than approved."""
@@ -79,7 +79,7 @@ async def test_the_three_reasons_a_decision_loses_are_told_apart(
 
 
 async def test_an_approved_decision_hands_back_the_call_to_replay(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """The replay is the whole point of capturing the call. Returned with the
     decision rather than re-read, so the loser of an arbitration does not run
     a second statement - and if it comes back empty, no approved call is ever
@@ -94,7 +94,7 @@ async def test_an_approved_decision_hands_back_the_call_to_replay(
 
 
 async def test_a_denied_decision_hands_back_nothing_to_replay(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """A denial is a refusal to run the call, so there is nothing to run."""
     _pending(db_conn, "refused")
     answer = await respond_to_hitl("refused", "deny")
@@ -103,7 +103,7 @@ async def test_a_denied_decision_hands_back_nothing_to_replay(
 
 
 async def test_a_sudo_grant_lasts_the_minutes_it_was_configured_for(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """Minutes, not seconds. A window short enough to close before the mind
     retries is a sudo mode that asks every time while reporting that it
     granted."""
@@ -122,7 +122,7 @@ async def test_a_sudo_grant_lasts_the_minutes_it_was_configured_for(
 
 
 async def test_a_decision_whose_grant_fails_leaves_the_request_decidable(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """The decision and the grant it earns are one unit of work.
 
     Committed separately they leave an end state nothing can recover from:
@@ -154,7 +154,7 @@ async def test_a_decision_whose_grant_fails_leaves_the_request_decidable(
 
 
 async def test_an_action_that_is_neither_approve_nor_deny_is_refused(
-        db_conn: sqlite3.Connection) -> None:
+        db_conn: RawSQL) -> None:
     """It used to deny. `{"action": "approved"}` - the natural past-tense
     mistake - denied the request irrevocably and answered 200 saying denied,
     and so did "yes" and an empty string."""

@@ -194,14 +194,80 @@ def hitl_gate(tool_name: str):
     return _check
 
 
+# Default HITL settings: tool_name -> mode
+_DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
+    # Calendar read tools -- off
+    ("calendar_list_events", "off", 15),
+    ("calendar_get_event", "off", 15),
+    ("calendar_list", "off", 15),
+    ("calendar_check_availability", "off", 15),
+    # Calendar write tools -- on
+    ("calendar_create_event", "on", 15),
+    ("calendar_quick_add", "on", 15),
+    ("calendar_update_event", "on", 15),
+    ("calendar_delete_event", "on", 15),
+    ("calendar_invite", "on", 15),
+    # Gmail read tools -- off
+    ("gmail_read_emails", "off", 15),
+    ("gmail_get_email", "off", 15),
+    ("gmail_list_labels", "off", 15),
+    # Gmail write tools -- on
+    ("gmail_send_email", "on", 15),
+    ("gmail_reply_email", "on", 15),
+    ("gmail_delete_email", "on", 15),
+    ("gmail_move_email", "on", 15),
+    # LinkedIn -- on
+    ("linkedin_post", "on", 15),
+    # Docker mutating -- on
+    ("docker_compose_up", "on", 15),
+    ("docker_compose_restart", "on", 15),
+    ("docker_compose_down", "on", 15),
+    # Docker read-only -- off
+    ("docker_compose_logs", "off", 15),
+    ("docker_compose_status", "off", 15),
+    ("docker_list_containers", "off", 15),
+    ("docker_list_networks", "off", 15),
+    # Browser -- on for actions that introduce external content or change page state
+    ("browser_navigate", "on", 15),
+    ("browser_click", "on", 15),
+    ("browser_type", "on", 15),
+    ("browser_web_search", "on", 15),
+    # Ollama generic LLM endpoints — read-only side effects, no approval needed
+    ("ollama_structured", "off", 15),
+    ("ollama_chat", "off", 15),
+    # Schema mutation — always HITL-gated. Adding new node/edge types is a
+    # durable schema decision and should never auto-execute.
+    ("schema_new_type", "on", 15),
+    # Training pipeline — off, because the only caller is the console and a
+    # console click is already a human act taken behind a login. Gating them
+    # would page the same person who just pressed the button, and the panel
+    # would sit on a pending response with nothing to show.
+    ("training_curate", "off", 15),
+    ("training_export", "off", 15),
+    ("training_train", "off", 15),
+    ("training_deploy", "off", 15),
+]
+
+
+async def seed_default_hitl_settings() -> None:
+    """Give each shipped tool its mode only if it has none.
+
+    Insert-if-absent, and that is the point: this runs on every boot, so a
+    replacing write would re-arm every approval gate the operator had turned
+    off, on every deploy, silently.
+    """
+    for tool_name, mode, timeout in _DEFAULT_HITL_SETTINGS:
+        await store.seed_setting(tool_name, mode, timeout)
+
+
 async def sync_tool_registry(
     default_mode: str = AUTO_REGISTER_DEFAULT_MODE,
     default_sudo_timeout_minutes: int = AUTO_REGISTER_DEFAULT_SUDO_TIMEOUT_MINUTES,
 ) -> int:
     """Upsert any tool name discovered at hitl_gate import time.
 
-    Existing rows in tool_hitl_settings are left alone (INSERT OR IGNORE)
-    so manual seeds in db.seed_default_hitl_settings and user-edited modes
+    Existing rows in tool_hitl_settings are left alone (insert-if-absent)
+    so the shipped modes in seed_default_hitl_settings and user-edited modes
     both survive. Returns the number of new rows inserted.
     """
     inserted = 0

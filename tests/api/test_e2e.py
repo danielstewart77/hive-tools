@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 import time
@@ -14,13 +13,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -55,7 +55,7 @@ def test_full_hitl_flow_off_mode(
 ) -> None:
     """Create token, call calendar endpoint (off mode), assert 200."""
     mock_svc.return_value = _mock_calendar_service()
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     headers = {"Authorization": f"Bearer {raw}"}
 
     # calendar_list_events defaults to off
@@ -70,8 +70,7 @@ def test_full_hitl_flow_on_mode(
     client: TestClient,
 ) -> None:
     """Create token, call gmail send (on mode), assert 202, approve, poll, assert 200."""
-    db = app.state.db
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     headers = {"Authorization": f"Bearer {raw}"}
 
     # gmail_send_email defaults to on
@@ -107,8 +106,7 @@ def test_full_hitl_flow_deny(
     client: TestClient,
 ) -> None:
     """Create token, call gmail send, assert 202, deny, poll, assert 403."""
-    db = app.state.db
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     headers = {"Authorization": f"Bearer {raw}"}
 
     resp = client.post(
@@ -138,8 +136,7 @@ def test_full_hitl_flow_timeout(
     client: TestClient,
 ) -> None:
     """Create token, call gmail send, assert 202, manually expire, poll, assert 408."""
-    db = app.state.db
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     headers = {"Authorization": f"Bearer {raw}"}
 
     resp = client.post(
@@ -168,13 +165,14 @@ def test_full_hitl_flow_sudo_mode(
     client: TestClient,
 ) -> None:
     """Create token, call tool in sudo mode, approve, verify grant, call again."""
-    db = app.state.db
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     headers = {"Authorization": f"Bearer {raw}"}
 
     # Set docker_compose_logs to sudo mode for testing
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode, sudo_timeout_minutes) VALUES (?, ?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode, sudo_timeout_minutes) VALUES (?, ?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("docker_compose_logs", "sudo", 15),
     )
     db.commit()

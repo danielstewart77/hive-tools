@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 import time
@@ -14,14 +13,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 def _make_app(tmp_path: Path) -> FastAPI:
     """Create an app with HITL endpoints wired."""
     from server import create_app
 
-    db_path = str(tmp_path / "test.db")
-    app = create_app(db_path=db_path)
+    app = create_app()
     return app
 
 
@@ -41,12 +40,11 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
 def _insert_hitl_request(app: FastAPI, status: str = "pending", expired: bool = False) -> str:
-    db = app.state.db
     request_id = str(uuid.uuid4())
     now = int(time.time())
     expires_at = now - 10 if expired else now + 300
@@ -129,7 +127,6 @@ def test_post_hitl_respond_deny_updates_status(
 def test_post_hitl_respond_approve_sudo_creates_grant(
     app: FastAPI, client: TestClient, auth_header: dict[str, str]
 ) -> None:
-    db = app.state.db
     # Set tool to sudo mode
     db.execute(
         "INSERT INTO tool_hitl_settings (tool_name, mode, sudo_timeout_minutes) VALUES (?, ?, ?)",

@@ -1,12 +1,12 @@
 """Tests for default HITL settings seeding."""
 
 from __future__ import annotations
+from tests.scratch import RawSQL
 
-import sqlite3
 
 
-async def test_seed_creates_default_settings(db_conn: sqlite3.Connection) -> None:
-    from db import seed_default_hitl_settings
+async def test_seed_creates_default_settings(db_conn: RawSQL) -> None:
+    from hitl import seed_default_hitl_settings
 
     await seed_default_hitl_settings()
 
@@ -20,8 +20,8 @@ async def test_seed_creates_default_settings(db_conn: sqlite3.Connection) -> Non
     assert "docker_compose_up" in tool_names
 
 
-async def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -> None:
-    from db import seed_default_hitl_settings
+async def test_seed_idempotent_does_not_overwrite(db_conn: RawSQL) -> None:
+    from hitl import seed_default_hitl_settings
 
     await seed_default_hitl_settings()
 
@@ -41,8 +41,8 @@ async def test_seed_idempotent_does_not_overwrite(db_conn: sqlite3.Connection) -
     assert row["mode"] == "sudo"
 
 
-async def test_default_modes_match_spec(db_conn: sqlite3.Connection) -> None:
-    from db import seed_default_hitl_settings
+async def test_default_modes_match_spec(db_conn: RawSQL) -> None:
+    from hitl import seed_default_hitl_settings
 
     await seed_default_hitl_settings()
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -12,13 +11,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_session import create_user
+from tests.scratch import run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -37,7 +37,7 @@ def test_get_login_page_returns_html(client: TestClient) -> None:
 
 
 def test_post_login_valid_sets_cookie(app: FastAPI, client: TestClient) -> None:
-    asyncio.run(create_user("daniel", "pass123", is_admin=True))
+    run(create_user("daniel", "pass123", is_admin=True))
     resp = client.post(
         "/login",
         data={"username": "daniel", "password": "pass123"},
