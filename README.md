@@ -69,6 +69,13 @@ cp .env.example .env        # then fill in real values — see the warning below
 docker compose up -d --build
 ```
 
+The image takes `UID`, `GID` and `DOCKER_GID` build args (defaults 1000, 1000,
+983) for the app user and the group that owns the host's Docker socket; pass
+the host's own values (`--build-arg DOCKER_GID=$(getent group docker | cut -d: -f3)`)
+anywhere else. No GPU is needed: only the training router's VRAM arbitration
+calls `nvidia-smi`, and without it the service starts and serves, reporting no
+card.
+
 The service listens on `9421`. FastAPI's `/docs`, `/redoc`, and `/openapi.json`
 are disabled deliberately: an exposed OpenAPI spec is a machine-readable map of
 every route and schema, and this service's routes reach real mail and real
