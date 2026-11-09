@@ -15,10 +15,15 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Create app user with docker socket access (GID 983 matches host docker group)
-RUN groupadd -g 983 docker && \
-    groupadd -g 1000 app && \
-    useradd -u 1000 -g app -G docker -m app
+# The app user, and a docker group whose GID is the host's, so the mounted
+# socket is usable without root. All three are properties of the host the
+# image runs on; the defaults are this workstation's.
+ARG UID=1000
+ARG GID=1000
+ARG DOCKER_GID=983
+RUN groupadd -o -g "$DOCKER_GID" docker && \
+    groupadd -o -g "$GID" app && \
+    useradd -u "$UID" -g app -G docker -m app
 
 # Set up venv
 RUN python -m venv /opt/venv
