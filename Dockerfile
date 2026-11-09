@@ -45,7 +45,7 @@ COPY --from=hive_data . /tmp/hive-data
 RUN pip install --no-cache-dir --no-deps /tmp/hive-data && rm -rf /tmp/hive-data
 
 # Copy application code
-COPY server.py config.py db.py schemas.py hitl.py auth_api.py auth_session.py store.py ui.py hive_logging.py ./
+COPY server.py config.py schemas.py hitl.py auth_api.py auth_session.py store.py ui.py hive_logging.py ./
 COPY tools/ tools/
 COPY templates/ templates/
 
