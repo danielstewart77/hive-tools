@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 import time
+from tests.scratch import RawSQL
 
 
-async def test_generate_token_returns_raw_and_stores_hash(db_conn: sqlite3.Connection) -> None:
+async def test_generate_token_returns_raw_and_stores_hash(db_conn: RawSQL) -> None:
     from auth_api import generate_token
 
     raw = await generate_token("ada")
@@ -19,7 +19,7 @@ async def test_generate_token_returns_raw_and_stores_hash(db_conn: sqlite3.Conne
     assert row["token_hash"] == hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def test_generate_token_hash_is_sha256(db_conn: sqlite3.Connection) -> None:
+async def test_generate_token_hash_is_sha256(db_conn: RawSQL) -> None:
     from auth_api import generate_token
 
     raw = await generate_token("bob")
@@ -29,7 +29,7 @@ async def test_generate_token_hash_is_sha256(db_conn: sqlite3.Connection) -> Non
     assert row["token_hash"] == expected_hash
 
 
-async def test_validate_token_returns_mind_name(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_returns_mind_name(db_conn: RawSQL) -> None:
     from auth_api import generate_token, validate_token
 
     raw = await generate_token("ada")
@@ -37,14 +37,14 @@ async def test_validate_token_returns_mind_name(db_conn: sqlite3.Connection) -> 
     assert result == "ada"
 
 
-async def test_validate_token_invalid_returns_none(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_invalid_returns_none(db_conn: RawSQL) -> None:
     from auth_api import validate_token
 
     result = await validate_token("not-a-real-token")
     assert result is None
 
 
-async def test_validate_token_revoked_returns_none(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_revoked_returns_none(db_conn: RawSQL) -> None:
     from auth_api import generate_token, revoke_token, validate_token
 
     raw = await generate_token("ada")
@@ -55,7 +55,7 @@ async def test_validate_token_revoked_returns_none(db_conn: sqlite3.Connection) 
     assert result is None
 
 
-async def test_validate_token_updates_last_used_at(db_conn: sqlite3.Connection) -> None:
+async def test_validate_token_updates_last_used_at(db_conn: RawSQL) -> None:
     from auth_api import generate_token, validate_token
 
     raw = await generate_token("ada")
@@ -74,7 +74,7 @@ async def test_validate_token_updates_last_used_at(db_conn: sqlite3.Connection) 
     assert row_after["last_used_at"] >= int(time.time()) - 5
 
 
-async def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None:
+async def test_revoke_token_sets_revoked_at(db_conn: RawSQL) -> None:
     from auth_api import generate_token, revoke_token
 
     await generate_token("ada")
@@ -90,7 +90,7 @@ async def test_revoke_token_sets_revoked_at(db_conn: sqlite3.Connection) -> None
 
 
 async def test_revoking_an_already_revoked_token_answers_false(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     """The count is the arbitration. A caller told it succeeded twice cannot
     tell a revocation it performed from one it merely repeated - and the
@@ -114,7 +114,7 @@ async def test_revoking_an_already_revoked_token_answers_false(
     ).fetchone()["revoked_at"] == first
 
 
-async def test_list_tokens_returns_all(db_conn: sqlite3.Connection) -> None:
+async def test_list_tokens_returns_all(db_conn: RawSQL) -> None:
     from auth_api import generate_token, list_tokens, revoke_token
 
     await generate_token("ada")

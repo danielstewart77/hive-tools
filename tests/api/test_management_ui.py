@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 import time
@@ -15,13 +14,14 @@ from fastapi.testclient import TestClient
 
 from auth_api import generate_token
 from auth_session import create_session_token, create_user
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -37,7 +37,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 def authed_client(app: FastAPI) -> Generator[TestClient, None, None]:
     """Client with session cookie set, on an app that has been started."""
     with TestClient(app, follow_redirects=False) as entered:
-        user = asyncio.run(create_user("daniel", "pass123", is_admin=True))
+        user = run(create_user("daniel", "pass123", is_admin=True))
         entered.cookies.set("ht_session", create_session_token(user))
         yield entered
 
@@ -68,7 +68,6 @@ def test_tools_page_save_updates_hitl_mode(
     )
     assert resp.status_code in (200, 302, 303)
 
-    db = app.state.db
     row = db.execute(
         "SELECT mode FROM tool_hitl_settings WHERE tool_name = ?",
         ("gmail_send_email",),
@@ -78,7 +77,7 @@ def test_tools_page_save_updates_hitl_mode(
 
 
 def test_tokens_page_lists_tokens(app: FastAPI, authed_client: TestClient) -> None:
-    asyncio.run(generate_token("ada"))
+    run(generate_token("ada"))
     resp = authed_client.get("/tokens")
     assert resp.status_code == 200
     assert "ada" in resp.text
@@ -97,8 +96,8 @@ def test_tokens_create_shows_raw_token_once(authed_client: TestClient) -> None:
 def test_tokens_revoke_sets_revoked_at(
     app: FastAPI, authed_client: TestClient
 ) -> None:
-    asyncio.run(generate_token("ada"))
-    row = app.state.db.execute(
+    run(generate_token("ada"))
+    row = db.execute(
         "SELECT id FROM api_tokens WHERE name = ?", ("ada",)
     ).fetchone()
     token_id = row["id"]
@@ -106,7 +105,7 @@ def test_tokens_revoke_sets_revoked_at(
     resp = authed_client.post(f"/tokens/{token_id}/revoke")
     assert resp.status_code in (200, 302, 303)
 
-    row = app.state.db.execute(
+    row = db.execute(
         "SELECT revoked_at FROM api_tokens WHERE id = ?", (token_id,)
     ).fetchone()
     assert row["revoked_at"] is not None
@@ -115,7 +114,6 @@ def test_tokens_revoke_sets_revoked_at(
 def test_hitl_page_lists_pending_requests(
     app: FastAPI, authed_client: TestClient
 ) -> None:
-    db = app.state.db
     request_id = str(uuid.uuid4())
     now = int(time.time())
     db.execute(
@@ -133,7 +131,6 @@ def test_hitl_page_lists_pending_requests(
 def test_hitl_page_approve_button_works(
     app: FastAPI, authed_client: TestClient
 ) -> None:
-    db = app.state.db
     request_id = str(uuid.uuid4())
     now = int(time.time())
     db.execute(
@@ -176,8 +173,8 @@ def test_the_queue_draws_an_expired_request_as_expired(
     buttons, one of them ninety-six days past its expiry."""
     stale = str(uuid.uuid4())
     live = str(uuid.uuid4())
-    _queued(app.state.db, stale, expires_in=-1)
-    _queued(app.state.db, live)
+    _queued(db, stale, expires_in=-1)
+    _queued(db, live)
 
     page = authed_client.get("/hitl-ui").text
     rows = {row.split("</tr>")[0] for row in page.split("<tr>")[1:]}
@@ -196,7 +193,7 @@ def test_deciding_an_expired_request_says_so_on_the_page(
     clicking Approve on a request that had expired reloaded the page, changed
     nothing, and said nothing."""
     stale = str(uuid.uuid4())
-    _queued(app.state.db, stale, expires_in=-1)
+    _queued(db, stale, expires_in=-1)
 
     resp = authed_client.post(f"/hitl-ui/{stale}/respond",
                               data={"action": "approve"})
@@ -204,7 +201,7 @@ def test_deciding_an_expired_request_says_so_on_the_page(
     followed = authed_client.get(resp.headers["location"]).text
     assert "expired" in followed
 
-    assert app.state.db.execute(
+    assert db.execute(
         "SELECT status FROM hitl_requests WHERE id = ?", (stale,)
     ).fetchone()["status"] == "pending"
 
@@ -213,7 +210,7 @@ def test_deciding_a_settled_request_says_who_got_there_first(
     app: FastAPI, authed_client: TestClient
 ) -> None:
     settled = str(uuid.uuid4())
-    _queued(app.state.db, settled)
+    _queued(db, settled)
 
     authed_client.post(f"/hitl-ui/{settled}/respond", data={"action": "deny"})
     resp = authed_client.post(f"/hitl-ui/{settled}/respond",
@@ -228,8 +225,8 @@ def test_revoking_a_token_twice_says_nothing_changed(
     """The count the revocation reports, which this route used to throw
     away - so the operator could not tell a revocation they performed from
     one they merely repeated."""
-    asyncio.run(generate_token("ada"))
-    token_id = app.state.db.execute(
+    run(generate_token("ada"))
+    token_id = db.execute(
         "SELECT id FROM api_tokens WHERE name = 'ada'").fetchone()["id"]
 
     first = authed_client.post(f"/tokens/{token_id}/revoke")

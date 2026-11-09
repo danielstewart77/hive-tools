@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -15,21 +14,20 @@ from fastapi.testclient import TestClient
 
 import store
 from auth_api import generate_token, require_api_token
+from tests.scratch import run
 
 
 @pytest.fixture()
 def app_with_auth(tmp_path: Path) -> FastAPI:
-    """A bare app around the token dependency, with a store of its own.
+    """A bare app around the token dependency.
 
     Not `create_app`: the point here is the dependency in isolation. The
     store still has to be opened for it, and it is opened in this app's own
     lifespan for the same reason the real one is.
     """
-    db_path = tmp_path / "test.db"
-
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        await store.open(str(db_path))
+        await store.open()
         try:
             yield
         finally:
@@ -64,7 +62,7 @@ def test_endpoint_with_invalid_token_returns_401(client: TestClient) -> None:
 
 
 def test_endpoint_with_valid_token_returns_200(client: TestClient) -> None:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
 
     resp = client.get("/protected", headers={"Authorization": f"Bearer {raw}"})
     assert resp.status_code == 200

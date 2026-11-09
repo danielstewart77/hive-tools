@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 import uuid
 
 import pytest
+from tests.scratch import RawSQL
 
 
-async def test_hitl_gate_mode_off_passes_through(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_gate_mode_off_passes_through(db_conn: RawSQL) -> None:
     from hitl import _check_hitl
 
     # No setting row means default "off"
@@ -18,7 +18,7 @@ async def test_hitl_gate_mode_off_passes_through(db_conn: sqlite3.Connection) ->
 
 
 async def test_hitl_gate_mode_on_creates_request_and_raises_202(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
 
@@ -36,7 +36,7 @@ async def test_hitl_gate_mode_on_creates_request_and_raises_202(
 
 
 async def test_hitl_gate_mode_sudo_with_valid_grant_passes_through(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     from hitl import _check_hitl
 
@@ -56,7 +56,7 @@ async def test_hitl_gate_mode_sudo_with_valid_grant_passes_through(
 
 
 async def test_hitl_gate_mode_sudo_without_grant_creates_request(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
 
@@ -71,7 +71,7 @@ async def test_hitl_gate_mode_sudo_without_grant_creates_request(
 
 
 async def test_hitl_gate_mode_sudo_with_expired_grant_creates_request(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     from hitl import HITLPendingException, _check_hitl
 
@@ -91,7 +91,7 @@ async def test_hitl_gate_mode_sudo_with_expired_grant_creates_request(
 
 
 async def test_hitl_gate_no_setting_defaults_to_off(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     from hitl import _check_hitl
 
@@ -99,7 +99,7 @@ async def test_hitl_gate_no_setting_defaults_to_off(
     assert result == "ada"
 
 
-async def test_hitl_request_has_uuid_id(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_request_has_uuid_id(db_conn: RawSQL) -> None:
     from hitl import HITLPendingException, _check_hitl
 
     db_conn.execute(
@@ -114,7 +114,7 @@ async def test_hitl_request_has_uuid_id(db_conn: sqlite3.Connection) -> None:
     uuid.UUID(exc_info.value.request_id)
 
 
-async def test_hitl_request_expires_in_5_minutes(db_conn: sqlite3.Connection) -> None:
+async def test_hitl_request_expires_in_5_minutes(db_conn: RawSQL) -> None:
     from hitl import HITLPendingException, _check_hitl
 
     db_conn.execute(

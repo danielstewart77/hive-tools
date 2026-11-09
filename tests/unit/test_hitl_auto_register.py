@@ -8,11 +8,11 @@ already registered via the normal import path (gmail, calendar, etc.).
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
+from tests.scratch import RawSQL
 
 
 @pytest.fixture()
@@ -39,7 +39,7 @@ def test_hitl_gate_records_tool_name_on_call() -> None:
 
 
 async def test_sync_tool_registry_upserts_with_default_mode_on(
-    db_conn: sqlite3.Connection, only_these_tools: object,
+    db_conn: RawSQL, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
@@ -58,7 +58,7 @@ async def test_sync_tool_registry_upserts_with_default_mode_on(
 
 
 async def test_sync_tool_registry_does_not_overwrite_user_edits(
-    db_conn: sqlite3.Connection, only_these_tools: object,
+    db_conn: RawSQL, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 
@@ -88,11 +88,11 @@ async def test_sync_tool_registry_does_not_overwrite_user_edits(
 
 
 async def test_sync_preserves_manual_seed_off_modes(
-    db_conn: sqlite3.Connection, only_these_tools: object,
+    db_conn: RawSQL, only_these_tools: object,
 ) -> None:
     """Manual seed in db.py sets read endpoints to 'off'. Auto-register
     must not flip them to 'on'."""
-    from db import seed_default_hitl_settings
+    from hitl import seed_default_hitl_settings
     from hitl import hitl_gate, sync_tool_registry
 
     await seed_default_hitl_settings()
@@ -109,7 +109,7 @@ async def test_sync_preserves_manual_seed_off_modes(
 
 
 async def test_sync_returns_zero_when_all_tools_already_present(
-    db_conn: sqlite3.Connection, only_these_tools: object,
+    db_conn: RawSQL, only_these_tools: object,
 ) -> None:
     from hitl import hitl_gate, sync_tool_registry
 

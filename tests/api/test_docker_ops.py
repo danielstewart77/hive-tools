@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -13,13 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -33,7 +33,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -48,9 +48,10 @@ def test_docker_compose_up_hitl_on_returns_202(
     auth_header: dict[str, str],
     tmp_path,
 ) -> None:
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("docker_compose_up", "on"),
     )
     db.commit()
@@ -122,10 +123,11 @@ def test_a_gated_call_whose_body_cannot_be_stored_is_refused(
     was queued on one store and 500ed on the other with no approval row and
     no notification. Refused here instead, because a body stored with the NUL
     taken out would replay a different call than the one approved."""
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) "
-        "VALUES (?, ?)", ("docker_compose_up", "on"))
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
+        ("docker_compose_up", "on"))
     db.commit()
 
     resp = client.post(
@@ -151,10 +153,11 @@ def test_a_body_with_invalid_utf8_is_still_queued(
     """Only the NUL is refused. Invalid UTF-8 has always been captured with
     the replacement character and is still gated, so the refusal is as narrow
     as the thing the database cannot hold."""
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) "
-        "VALUES (?, ?)", ("docker_compose_up", "on"))
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
+        ("docker_compose_up", "on"))
     db.commit()
 
     resp = client.post(

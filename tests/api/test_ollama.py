@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -13,13 +12,14 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from tests.scratch import run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -35,7 +35,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 def auth_headers(app: FastAPI) -> dict[str, str]:
     from auth_api import generate_token
 
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 

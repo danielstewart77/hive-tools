@@ -20,7 +20,7 @@ from auth_session import (
     verify_user_credentials,
 )
 import store
-from config import BASE_DIR, DB_PATH
+from config import BASE_DIR
 from hitl import (
     HITLPendingException,
     UncapturableCall,
@@ -28,6 +28,7 @@ from hitl import (
     _replay_request_async,
     get_hitl_status,
     respond_to_hitl,
+    seed_default_hitl_settings,
     sync_tool_registry,
 )
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -40,24 +41,14 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 def _already_seeded(exc: BaseException) -> bool:
-    """Whether a failed admin seed failed because the admin already exists.
+    """Whether a failed admin seed failed because the admin already exists."""
+    from hive_data.errors import Conflict
 
-    Matched on the class names rather than imported, because which of them
-    can be raised depends on which store answered - `hive_data.Conflict` on
-    Postgres, `sqlite3.IntegrityError` on the file - and importing
-    `hive_data` here would make the Postgres package a hard dependency of
-    the SQLite path.
-    """
-    for cause in (exc, exc.__cause__, exc.__context__):
-        if cause is None:
-            continue
-        if type(cause).__name__ in ("Conflict", "IntegrityError",
-                                    "UniqueViolationError"):
-            return True
-    return False
+    return any(isinstance(cause, Conflict)
+               for cause in (exc, exc.__cause__, exc.__context__))
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
+def create_app() -> FastAPI:
     """Application factory."""
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -76,10 +67,10 @@ def create_app(db_path: str | None = None) -> FastAPI:
         stack stopped and Ollama evicted with nobody left to put them
         back. The journal on disk is what survives; this reads it.
         """
-        await store.open(db_path or DB_PATH)
-        _app.state.db = store.sqlite_connection()
-        log.info("hive-tools store: %s",
-                 "postgres" if store.on_postgres() else "sqlite")
+        # First, and raising: with no database named this refuses before
+        # anything below can read an empty store and seed it.
+        await store.open()
+        log.info("hive-tools store: postgres")
 
         if await store.count_users() == 0:
             import os
@@ -99,8 +90,6 @@ def create_app(db_path: str | None = None) -> FastAPI:
             else:
                 log.info("Admin user seeded from HT_ADMIN_PASSWORD (env var "
                          "no longer needed after this boot)")
-
-        from db import seed_default_hitl_settings
 
         await seed_default_hitl_settings()
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -13,13 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -33,7 +33,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -50,9 +50,10 @@ def test_post_linkedin_hitl_on_returns_202(
     auth_header: dict[str, str],
 ) -> None:
     mock_load.return_value = {"access_token": "tok", "expires_at": 9999999999, "user_id": "u1"}
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("linkedin_post", "on"),
     )
     db.commit()
@@ -94,11 +95,13 @@ def test_post_linkedin_success_returns_post_id(
     mock_load.return_value = {"access_token": "tok", "expires_at": 9999999999, "user_id": "u1"}
     mock_post.return_value = {"ok": True, "post_id": "urn:li:share:123", "message": "Posted successfully."}
     # Disable HITL so the call goes through to the mocked implementation
-    app.state.db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+    db.execute(
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("linkedin_post", "off"),
     )
-    app.state.db.commit()
+    db.commit()
     resp = client.post(
         "/linkedin/post",
         json={"content": "Hello LinkedIn"},

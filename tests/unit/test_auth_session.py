@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import sqlite3
 
 import pytest
+from tests.scratch import RawSQL
 
 
 def test_hash_password_returns_prefixed_string() -> None:
@@ -35,7 +35,7 @@ def test_verify_password_wrong() -> None:
     assert verify_password("wrong", hashed) is False
 
 
-async def test_create_user_and_get_by_username(db_conn: sqlite3.Connection) -> None:
+async def test_create_user_and_get_by_username(db_conn: RawSQL) -> None:
     from auth_session import create_user, get_user_by_username
 
     user = await create_user("daniel", "pass123")
@@ -46,7 +46,7 @@ async def test_create_user_and_get_by_username(db_conn: sqlite3.Connection) -> N
     assert fetched["username"] == "daniel"
 
 
-async def test_create_user_duplicate_raises(db_conn: sqlite3.Connection) -> None:
+async def test_create_user_duplicate_raises(db_conn: RawSQL) -> None:
     """Named by what the application branches on, not by one backend's
     exception class. The bootstrap seed catches "this user already exists" to
     survive an overlapping redeploy, and which class carries it depends on
@@ -79,7 +79,7 @@ def test_read_session_token_invalid_returns_none() -> None:
     assert result is None
 
 
-async def test_verify_user_credentials_valid(db_conn: sqlite3.Connection) -> None:
+async def test_verify_user_credentials_valid(db_conn: RawSQL) -> None:
     from auth_session import create_user, verify_user_credentials
 
     await create_user("daniel", "pass123")
@@ -89,7 +89,7 @@ async def test_verify_user_credentials_valid(db_conn: sqlite3.Connection) -> Non
 
 
 async def test_verify_user_credentials_disabled_returns_none(
-    db_conn: sqlite3.Connection,
+    db_conn: RawSQL,
 ) -> None:
     import time
 

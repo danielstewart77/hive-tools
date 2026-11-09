@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -13,13 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -33,7 +33,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -125,9 +125,10 @@ def test_send_email_hitl_on_returns_202(
     client: TestClient,
     auth_header: dict[str, str],
 ) -> None:
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("gmail_send_email", "on"),
     )
     db.commit()
@@ -145,9 +146,10 @@ def test_reply_email_hitl_on_returns_202(
     client: TestClient,
     auth_header: dict[str, str],
 ) -> None:
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("gmail_reply_email", "on"),
     )
     db.commit()
@@ -165,9 +167,10 @@ def test_delete_email_hitl_on_returns_202(
     client: TestClient,
     auth_header: dict[str, str],
 ) -> None:
-    db = app.state.db
     db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("gmail_delete_email", "on"),
     )
     db.commit()

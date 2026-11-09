@@ -48,36 +48,19 @@ says approved, the call it authorised was never replayed, and the decision
 is guarded on `pending` so it can never be approved again.
 
 A gated call whose body holds a NUL byte is refused with a 400 rather than
-queued. A NUL is valid UTF-8, so `errors="replace"` leaves it alone; SQLite
-stored it and Postgres refuses it outright. Refused rather than escaped,
+queued. A NUL is valid UTF-8, so `errors="replace"` leaves it alone, and
+Postgres refuses it outright. Refused rather than escaped,
 because the whole purpose of capturing the body is that an approval replays
 the call that was approved, and a body stored with the NUL taken out is a
 different call.
 
 ## Where the data lives
 
-One value in the environment decides. `HIVE_DATABASE_URL` set means the
-hive's Postgres through `hive_data`; unset means this host's own
-`data/hivetools.db` exactly as before. That is the revert — unset it and
-restart — and it is why both halves exist for now. Nothing outside
-`store.py` opens a database or writes SQL.
-
-Both halves are held to answering the same thing, and
-`tests/test_store_parity.py` is what holds them: it runs one sequence of
-operations against a temporary SQLite file and against a scratch Postgres
-database it creates and drops, and compares. It needs
-`HIVE_DATA_TEST_ADMIN_DSN` to name a server and skips cleanly without one.
-Every other test in the suite runs on the SQLite half, pinned there
-regardless of what this host exports, so the result does not depend on the
-shell the suite was started from.
-
-The SQLite half runs its statements off the event loop on **one** thread.
-There is a single `sqlite3.Connection`, and a `sqlite3.Connection` is not
-safe to use from two threads at once whatever `check_same_thread` says: on
-the default pool, two statements interleave and return each other's rows.
-Measured through the live routes at fifty concurrent writes, that was
-fourteen errors and three valid bearer tokens rejected with a 401. One
-worker restores what the synchronous code it replaced had by construction.
+The `tools` schema of the hive's Postgres, through `hive_data`, at
+`HIVE_DATABASE_URL`. It is required: unset, the service refuses to start —
+before the first-boot admin seed below can read an empty store and seed it.
+The SQLite file this service used before the cutover is retired and nothing
+reads it. Nothing outside `store.py` opens a database or writes SQL.
 
 ## Running it
 
@@ -98,7 +81,7 @@ phones.
   first boot seeds an `admin` user from the latter. Leaving them unset gives you
   a deployment whose admin credential is published in this README.
 - `credentials/` and `data/` are ignored wholesale, not by file extension —
-  OAuth tokens, service-account JSON, and the SQLite store never enter git.
+  OAuth tokens and service-account JSON never enter git.
 - The Docker socket is mounted for the `docker_ops` router. That is root-
   equivalent access to the host daemon. Run this service only on a host you
   trust it with, and keep `9421` off the public internet.
@@ -108,11 +91,11 @@ phones.
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pytest        # zero failures is the bar
-
-# and, to compare the two halves of the store against each other:
-HIVE_DATA_TEST_ADMIN_DSN=postgresql://... .venv/bin/python -m pytest
+HIVE_DATA_TEST_ADMIN_DSN=postgresql://... .venv/bin/python -m pytest   # zero failures is the bar
 ```
+
+The suite runs on a scratch Postgres it creates, claims and drops on the
+server `HIVE_DATA_TEST_ADMIN_DSN` names, never on the live database.
 
 Tests land with code changes.
 

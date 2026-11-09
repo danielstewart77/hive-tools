@@ -8,7 +8,6 @@ rather than a stack trace, and launching a fine-tune is never the default.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 import json
@@ -21,13 +20,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import store
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -43,7 +43,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 def auth_headers(client: TestClient) -> dict[str, str]:
     from auth_api import generate_token
 
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -62,7 +62,7 @@ def hitl_off(client: TestClient):
         "training_train",
         "training_deploy",
     ):
-        asyncio.run(store.set_setting(tool, "off", 15))
+        run(store.set_setting(tool, "off", 15))
 
 
 @pytest.fixture()
@@ -271,11 +271,13 @@ def test_timeout_is_reported_as_gateway_timeout(client, auth_headers, fake_cli):
 
 def test_mutating_endpoints_are_hitl_gated(client, auth_headers, app, fake_cli):
     """With the gate on, a curate request waits for approval instead of running."""
-    app.state.db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+    db.execute(
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("training_curate", "on"),
     )
-    app.state.db.commit()
+    db.commit()
     with _patch_run(fake_cli, {"kept": 1}):
         response = client.post("/training/curate", headers=auth_headers, json={})
     assert response.status_code == 202

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Generator
 
 from pathlib import Path
@@ -13,13 +12,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth_api import generate_token
+from tests.scratch import db, run
 
 
 @pytest.fixture()
 def app(tmp_path: Path) -> FastAPI:
     from server import create_app
 
-    return create_app(db_path=str(tmp_path / "test.db"))
+    return create_app()
 
 
 @pytest.fixture()
@@ -33,7 +33,7 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
-    raw = asyncio.run(generate_token("ada"))
+    raw = run(generate_token("ada"))
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -44,11 +44,13 @@ def _gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _hitl_off(app: FastAPI) -> None:
-    app.state.db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+    db.execute(
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("sms_send", "off"),
     )
-    app.state.db.commit()
+    db.commit()
 
 
 def test_send_requires_auth(client: TestClient) -> None:
@@ -63,11 +65,13 @@ def test_send_hitl_on_returns_202(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _gateway_env(monkeypatch)
-    app.state.db.execute(
-        "INSERT OR REPLACE INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?)",
+    db.execute(
+        "INSERT INTO tool_hitl_settings (tool_name, mode) VALUES (?, ?) "
+        "ON CONFLICT (tool_name) DO UPDATE SET mode = excluded.mode, "
+        "sudo_timeout_minutes = excluded.sudo_timeout_minutes",
         ("sms_send", "on"),
     )
-    app.state.db.commit()
+    db.commit()
 
     resp = client.post(
         "/sms/send",
