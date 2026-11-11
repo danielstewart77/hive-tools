@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from auth_api import require_api_token
+from auth_api import require_api_token, require_approver
 from auth_session import (
     create_user,
     get_current_user_from_request,
@@ -188,7 +188,9 @@ def create_app() -> FastAPI:
     async def hitl_respond(
         request_id: str,
         body: HITLRespondRequest,
-        caller: str = Depends(require_api_token),
+        # The approver credential only: a mind's token is refused before
+        # anything is decided, so a mind cannot approve the call it asked for.
+        caller: str = Depends(require_approver),
     ) -> Any:
         try:
             result = await respond_to_hitl(request_id, body.action)

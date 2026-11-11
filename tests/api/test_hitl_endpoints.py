@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_token
+from auth_api import generate_approver_token, generate_token
 from tests.scratch import db, run
 
 
@@ -41,6 +41,12 @@ def client(app: FastAPI) -> Generator[TestClient, None, None]:
 @pytest.fixture()
 def auth_header(client: TestClient) -> dict[str, str]:
     raw = run(generate_token("ada"))
+    return {"Authorization": f"Bearer {raw}"}
+
+
+@pytest.fixture()
+def approver_header(client: TestClient) -> dict[str, str]:
+    raw = run(generate_approver_token())
     return {"Authorization": f"Bearer {raw}"}
 
 
@@ -99,33 +105,33 @@ def test_get_hitl_status_unknown_id_returns_404(
 
 
 def test_post_hitl_respond_approve_updates_status(
-    app: FastAPI, client: TestClient, auth_header: dict[str, str]
+    app: FastAPI, client: TestClient, approver_header: dict[str, str]
 ) -> None:
     request_id = _insert_hitl_request(app, "pending")
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "approve"},
-        headers=auth_header,
+        headers=approver_header,
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
 
 
 def test_post_hitl_respond_deny_updates_status(
-    app: FastAPI, client: TestClient, auth_header: dict[str, str]
+    app: FastAPI, client: TestClient, approver_header: dict[str, str]
 ) -> None:
     request_id = _insert_hitl_request(app, "pending")
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "deny"},
-        headers=auth_header,
+        headers=approver_header,
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "denied"
 
 
 def test_post_hitl_respond_approve_sudo_creates_grant(
-    app: FastAPI, client: TestClient, auth_header: dict[str, str]
+    app: FastAPI, client: TestClient, approver_header: dict[str, str]
 ) -> None:
     # Set tool to sudo mode
     db.execute(
@@ -138,7 +144,7 @@ def test_post_hitl_respond_approve_sudo_creates_grant(
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "approve"},
-        headers=auth_header,
+        headers=approver_header,
     )
     assert resp.status_code == 200
 
@@ -150,12 +156,12 @@ def test_post_hitl_respond_approve_sudo_creates_grant(
 
 
 def test_post_hitl_respond_already_resolved_returns_409(
-    app: FastAPI, client: TestClient, auth_header: dict[str, str]
+    app: FastAPI, client: TestClient, approver_header: dict[str, str]
 ) -> None:
     request_id = _insert_hitl_request(app, "approved")
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "approve"},
-        headers=auth_header,
+        headers=approver_header,
     )
     assert resp.status_code == 409
