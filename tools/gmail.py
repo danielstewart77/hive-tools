@@ -6,9 +6,12 @@ import base64
 import html
 import logging
 import re
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlsplit
 
+import httpx
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
@@ -153,6 +156,127 @@ def _get_header(headers: list[dict[str, str]], name: str) -> str:
     return ""
 
 
+def _send_mime(service: Any, msg: Any, thread_id: str = "") -> dict[str, Any]:
+    """Send a built MIME message: the one send path every write here uses."""
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    payload: dict[str, Any] = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+    result = service.users().messages().send(userId="me", body=payload).execute()
+    return {
+        "status": "sent",
+        "message_id": result["id"],
+        "thread_id": result.get("threadId", ""),
+    }
+
+
+# ---- Labels ----
+
+
+class UnknownLabel(ValueError):
+    """A label given by name that the account does not have."""
+
+
+def _account_labels(service: Any) -> list[dict[str, Any]]:
+    return service.users().labels().list(userId="me").execute().get("labels", [])
+
+
+def _find_label(labels: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """The label called `name` - exact first, then case-insensitively.
+
+    Gmail treats label names as case-insensitive (it refuses "receipts"
+    beside "Receipts"), so the fallback finds what Gmail would call the same.
+    """
+    for lbl in labels:
+        if lbl.get("name") == name:
+            return lbl
+    folded = name.casefold()
+    for lbl in labels:
+        if str(lbl.get("name", "")).casefold() == folded:
+            return lbl
+    return None
+
+
+def _resolve_label_ids(service: Any, entries: list[str]) -> list[str]:
+    """Label ids for a mix of ids and names; an unknown name raises.
+
+    An entry that is already an id is passed through, so callers that send
+    ids keep working. Anything else must be the name of one of the
+    account's labels.
+    """
+    if not entries:
+        return []
+    labels = _account_labels(service)
+    ids = {lbl["id"] for lbl in labels}
+    resolved: list[str] = []
+    unknown: list[str] = []
+    for entry in entries:
+        if entry in ids:
+            resolved.append(entry)
+            continue
+        found = _find_label(labels, entry)
+        if found is None:
+            unknown.append(entry)
+        else:
+            resolved.append(found["id"])
+    if unknown:
+        raise UnknownLabel(", ".join(unknown))
+    return resolved
+
+
+# ---- Unsubscribe ----
+
+#: The outbound transport for one-click unsubscribe POSTs. None is httpx's
+#: real network transport; tests swap in a MockTransport.
+_UNSUBSCRIBE_TRANSPORT: httpx.BaseTransport | None = None
+
+ONE_CLICK_BODY = "List-Unsubscribe=One-Click"
+
+
+def _unsubscribe_plan(list_unsubscribe: str, list_unsubscribe_post: str) -> dict[str, Any]:
+    """Decide how to unsubscribe from a message's List-Unsubscribe headers.
+
+    RFC 8058 one-click (an https URL plus `List-Unsubscribe-Post:
+    List-Unsubscribe=One-Click`) wins; a mailto is next, because it can be
+    sent without a browser; a bare web link is last and is only reported.
+    """
+    targets = re.findall(r"<\s*([^>]+?)\s*>", list_unsubscribe or "")
+    https = [t for t in targets if t.lower().startswith("https://")]
+    web = [t for t in targets if t.lower().startswith(("https://", "http://"))]
+    mailto = [t for t in targets if t.lower().startswith("mailto:")]
+    one_click = ONE_CLICK_BODY.lower() in (list_unsubscribe_post or "").lower().replace(" ", "")
+
+    if https and one_click:
+        return {"method": "one_click", "url": https[0]}
+    if mailto:
+        return {"method": "mailto", "mailto": mailto[0]}
+    if web:
+        return {"method": "browser", "url": web[0]}
+    return {"method": "none"}
+
+
+def _parse_mailto(mailto: str) -> tuple[str, str, str]:
+    """(to, subject, body) from a mailto: URI, with unsubscribe defaults."""
+    parts = urlsplit(mailto)
+    to = unquote(parts.path)
+    query = {k.lower(): v for k, v in parse_qs(parts.query).items()}
+    if not to and "to" in query:
+        to = query["to"][0]
+    subject = query.get("subject", ["unsubscribe"])[0] or "unsubscribe"
+    body = query.get("body", ["unsubscribe"])[0] or "unsubscribe"
+    return to, subject, body
+
+
+def _one_click_post(url: str) -> httpx.Response:
+    with httpx.Client(transport=_UNSUBSCRIBE_TRANSPORT, timeout=30.0,
+                      follow_redirects=False) as client:
+        return client.post(
+            url,
+            content=ONE_CLICK_BODY,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+
 # ---- Request models for write endpoints ----
 
 
@@ -179,8 +303,18 @@ class GmailTrashBody(BaseModel):
 
 class GmailMoveBody(BaseModel):
     message_id: str
+    # Comma-separated label ids or label names, mixed freely.
     add_labels: str = ""
     remove_labels: str = ""
+
+
+class GmailCreateLabelBody(BaseModel):
+    # Nested labels use "/", e.g. "Receipts/2026".
+    name: str
+
+
+class GmailUnsubscribeBody(BaseModel):
+    message_id: str
 
 
 # ---- Read endpoints (default HITL: off) ----
@@ -310,7 +444,6 @@ async def send_email(
     try:
         from email.mime.multipart import MIMEMultipart
         from email.mime.base import MIMEBase
-        from email.mime.text import MIMEText
         from email import encoders
         import mimetypes
 
@@ -343,14 +476,7 @@ async def send_email(
         if body.cc:
             msg["cc"] = body.cc
 
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        result = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-
-        return {
-            "status": "sent",
-            "message_id": result["id"],
-            "thread_id": result.get("threadId", ""),
-        }
+        return _send_mime(service, msg)
     except Exception as e:
         log.exception("send_email failed")
         return {"error": str(e)}
@@ -380,8 +506,6 @@ async def reply_to_email(
 
         subject = orig_subject if orig_subject.lower().startswith("re:") else f"Re: {orig_subject}"
 
-        from email.mime.text import MIMEText
-
         msg = MIMEText(body.body)
         msg["to"] = orig_from
         msg["subject"] = subject
@@ -389,16 +513,7 @@ async def reply_to_email(
             msg["In-Reply-To"] = orig_msg_id
             msg["References"] = orig_msg_id
 
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        result = service.users().messages().send(
-            userId="me", body={"raw": raw, "threadId": thread_id}
-        ).execute()
-
-        return {
-            "status": "sent",
-            "message_id": result["id"],
-            "thread_id": result.get("threadId", ""),
-        }
+        return _send_mime(service, msg, thread_id)
     except Exception as e:
         log.exception("reply_to_email failed")
         return {"error": str(e)}
@@ -439,10 +554,15 @@ async def move_email(
         return {"error": "Gmail not authenticated"}
 
     try:
+        try:
+            add_ids = _resolve_label_ids(service, add)
+            remove_ids = _resolve_label_ids(service, remove)
+        except UnknownLabel as e:
+            return {"error": f"Unknown label(s): {e}"}
         result = service.users().messages().modify(
             userId="me",
             id=body.message_id,
-            body={"addLabelIds": add, "removeLabelIds": remove},
+            body={"addLabelIds": add_ids, "removeLabelIds": remove_ids},
         ).execute()
         return {
             "status": "updated",
@@ -451,4 +571,95 @@ async def move_email(
         }
     except Exception as e:
         log.exception("move_email failed")
+        return {"error": str(e)}
+
+
+@router.post("/labels")
+async def create_label(
+    body: GmailCreateLabelBody,
+    caller: str = Depends(hitl_gate("gmail_create_label")),
+) -> Any:
+    """Create a label (nested via "/"), or return the one already there."""
+    name = body.name.strip()
+    if not name:
+        return {"error": "Label name is empty."}
+
+    service = _get_gmail_service()
+    if service is None:
+        return {"error": "Gmail not authenticated"}
+
+    try:
+        existing = _find_label(_account_labels(service), name)
+        if existing is not None:
+            return {"id": existing["id"], "name": existing["name"], "created": False}
+        try:
+            created = service.users().labels().create(
+                userId="me",
+                body={
+                    "name": name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                },
+            ).execute()
+        except Exception:
+            # Created between our list and our create: answer with that one.
+            raced = _find_label(_account_labels(service), name)
+            if raced is None:
+                raise
+            return {"id": raced["id"], "name": raced["name"], "created": False}
+        return {"id": created["id"], "name": created["name"], "created": True}
+    except Exception as e:
+        log.exception("create_label failed")
+        return {"error": str(e)}
+
+
+@router.post("/unsubscribe")
+async def unsubscribe(
+    body: GmailUnsubscribeBody,
+    caller: str = Depends(hitl_gate("gmail_unsubscribe")),
+) -> Any:
+    """Unsubscribe from a message's list via its List-Unsubscribe headers."""
+    service = _get_gmail_service()
+    if service is None:
+        return {"error": "Gmail not authenticated"}
+
+    try:
+        msg = service.users().messages().get(
+            userId="me", id=body.message_id, format="metadata",
+            metadataHeaders=["List-Unsubscribe", "List-Unsubscribe-Post"],
+        ).execute()
+        headers = msg.get("payload", {}).get("headers", [])
+        plan = _unsubscribe_plan(
+            _get_header(headers, "List-Unsubscribe"),
+            _get_header(headers, "List-Unsubscribe-Post"),
+        )
+        result: dict[str, Any] = {"message_id": body.message_id, **plan}
+
+        if plan["method"] == "one_click":
+            resp = _one_click_post(plan["url"])
+            ok = resp.status_code < 400
+            result.update({
+                "outcome": "unsubscribed" if ok else "failed",
+                "http_status": resp.status_code,
+            })
+        elif plan["method"] == "mailto":
+            to, subject, text = _parse_mailto(plan["mailto"])
+            if not to:
+                return {**result, "outcome": "failed", "error": "mailto has no address"}
+            out = MIMEText(text)
+            out["to"] = to
+            out["subject"] = subject
+            sent = _send_mime(service, out)
+            result.update({"outcome": "email_sent", "to": to, "subject": subject,
+                           "sent_message_id": sent["message_id"]})
+        elif plan["method"] == "browser":
+            result.update({"outcome": "needs_browser", "needs_browser": True})
+        else:
+            result.update({"outcome": "no_unsubscribe_header"})
+        # Logged because an approved call's response goes to the HITL replay,
+        # not to the mind that asked: this line is where it can be read.
+        log.info("gmail unsubscribe %s: %s", body.message_id, result)
+        return result
+    except Exception as e:
+        log.exception("unsubscribe failed")
         return {"error": str(e)}
