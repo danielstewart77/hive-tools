@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hitl
-from auth_api import generate_token
+from auth_api import generate_approver_token, generate_token
 from tests.scratch import run
 
 ADA_ID = "565e5a66-d20c-4266-872a-3268c4c894fc"
@@ -103,10 +103,14 @@ def _label_created(label_id: str) -> Answer:
     return answer
 
 
-def _approve(client: TestClient, headers: dict[str, str],
-             request_id: str) -> None:
+def _approver() -> dict[str, str]:
+    """The credential the surface bots send when Daniel taps Approve."""
+    return {"Authorization": f"Bearer {run(generate_approver_token())}"}
+
+
+def _approve(client: TestClient, request_id: str) -> None:
     decided = client.post(f"/hitl/{request_id}/respond",
-                          json={"action": "approve"}, headers=headers)
+                          json={"action": "approve"}, headers=_approver())
     assert decided.status_code == 200
     run(hitl.settle_replays(timeout=10))
 
@@ -117,7 +121,7 @@ def _approved_label_request(client: TestClient,
     asked = client.post("/gmail/labels", json=LABEL, headers=ada)
     assert asked.status_code == 202
     request_id = asked.json()["hitl_request_id"]
-    _approve(client, ada, request_id)
+    _approve(client, request_id)
     return request_id
 
 
@@ -253,7 +257,7 @@ def test_a_linkedin_post_is_captured_so_its_approval_replays_it(
     asked = client.post("/linkedin/post", json=post, headers=ada)
     assert asked.status_code == 202
     request_id = asked.json()["hitl_request_id"]
-    _approve(client, ada, request_id)
+    _approve(client, request_id)
 
     assert [(r.method, r.url.path) for r in replayed] == [
         ("POST", "/linkedin/post")]
@@ -277,7 +281,7 @@ def test_a_replay_still_running_at_shutdown_is_recorded_as_cut_off(
     asked = client.post("/gmail/labels", json=LABEL, headers=ada)
     request_id = asked.json()["hitl_request_id"]
     client.post(f"/hitl/{request_id}/respond", json={"action": "approve"},
-                headers=ada)
+                headers=_approver())
 
     run(hitl.settle_replays(timeout=0.2))
     outcome = client.get(f"/hitl/{request_id}", headers=ada).json()["outcome"]
@@ -285,3 +289,54 @@ def test_a_replay_still_running_at_shutdown_is_recorded_as_cut_off(
     assert outcome["success"] is False
     assert outcome["error"] == hitl.CUT_OFF_ERROR
     assert len(comms) == 1
+
+
+def test_a_mind_approving_its_own_gated_request_is_refused_and_it_stays_pending(
+        client: TestClient, ada: dict[str, str], comms: list[httpx.Request],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    replayed = _tool_answers(monkeypatch, _label_created("Label_never"))
+    asked = client.post("/gmail/labels", json=LABEL, headers=ada)
+    request_id = asked.json()["hitl_request_id"]
+
+    refused = client.post(f"/hitl/{request_id}/respond",
+                          json={"action": "approve"}, headers=ada)
+    run(hitl.settle_replays(timeout=10))
+
+    assert refused.status_code == 403
+    assert "A mind cannot decide its own gate" in refused.json()["detail"]
+    status = client.get(f"/hitl/{request_id}", headers=ada)
+    assert status.status_code == 202
+    assert status.json()["status"] == "pending"
+    assert replayed == []
+
+
+def test_the_approver_credential_approves_a_gated_request_and_it_is_replayed(
+        client: TestClient, ada: dict[str, str], comms: list[httpx.Request],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    label_id = f"Label_{uuid.uuid4().hex[:8]}"
+    replayed = _tool_answers(monkeypatch, _label_created(label_id))
+    asked = client.post("/gmail/labels", json=LABEL, headers=ada)
+    request_id = asked.json()["hitl_request_id"]
+
+    decided = client.post(f"/hitl/{request_id}/respond",
+                          json={"action": "approve"}, headers=_approver())
+    run(hitl.settle_replays(timeout=10))
+
+    assert decided.status_code == 200
+    assert decided.json()["status"] == "approved"
+    assert [(r.method, r.url.path) for r in replayed] == [
+        ("POST", "/gmail/labels")]
+    outcome = client.get(f"/hitl/{request_id}", headers=ada).json()["outcome"]
+    assert outcome["success"] is True
+    assert outcome["result"]["id"] == label_id
+
+
+def test_the_approver_credential_cannot_make_a_gated_call_of_its_own(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    replayed = _tool_answers(monkeypatch, _label_created("Label_never"))
+
+    asked = client.post("/gmail/labels", json=LABEL, headers=_approver())
+
+    assert asked.status_code == 403
+    assert "hitl_request_id" not in asked.json()
+    assert replayed == []

@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from auth_api import generate_token
+from auth_api import generate_approver_token, generate_token
 from tests.scratch import db, run
 
 
@@ -91,7 +91,7 @@ def test_full_hitl_flow_on_mode(
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "approve"},
-        headers=headers,
+        headers={"Authorization": f"Bearer {run(generate_approver_token())}"},
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "approved"
@@ -121,7 +121,7 @@ def test_full_hitl_flow_deny(
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "deny"},
-        headers=headers,
+        headers={"Authorization": f"Bearer {run(generate_approver_token())}"},
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "denied"
@@ -186,7 +186,7 @@ def test_full_hitl_flow_sudo_mode(
     resp = client.post(
         f"/hitl/{request_id}/respond",
         json={"action": "approve"},
-        headers=headers,
+        headers={"Authorization": f"Bearer {run(generate_approver_token())}"},
     )
     assert resp.status_code == 200
 
