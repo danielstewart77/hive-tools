@@ -38,7 +38,10 @@ log = configure_logging("hive-tools")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
-#: How long shutdown waits for replays in flight to record their outcomes.
+#: How long shutdown waits for replays in flight before recording each one
+#: still running as cut off. Inside the container's stop grace period
+#: (`stop_grace_period` in docker-compose.yml), with room left to record
+#: and send those outcomes.
 REPLAY_SETTLE_SECONDS = 10
 
 
@@ -165,7 +168,7 @@ def create_app() -> FastAPI:
         request_id: str,
         caller: str = Depends(require_api_token),
     ) -> Any:
-        status = await get_hitl_status(request_id)
+        status = await get_hitl_status(request_id, caller)
         if status is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 

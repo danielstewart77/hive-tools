@@ -50,8 +50,10 @@ is guarded on `pending` so it can never be approved again.
 An approval replays the captured call with the internal credential, and what
 the replay did is stored on the request: whether it succeeded, its HTTP
 status, and the body the tool answered with. A status outside 2xx, a replay
-that never got an answer, and a 2xx whose body carries `error` (a tool that
-caught its own failure) are all stored as failed. `GET /hitl/{id}` returns it
+that never got an answer (it is given 15 minutes), and a 2xx whose body
+reports a caught failure (`error`, `_error`, `ok: false`, or
+`status: "error"`) are all stored as failed. A replay still running at
+shutdown is recorded as cut off, with the tool's effect unknown. `GET /hitl/{id}` returns it
 as `outcome` on an approved request — `null` until the replay has landed —
 and hive-tools then sends the asking mind one broker message through
 hive-comms (`POST /broker/messages`, from and to that mind's id, on a fresh
