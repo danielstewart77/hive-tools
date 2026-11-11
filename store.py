@@ -267,6 +267,18 @@ async def decide_request(request_id: str, status: str, decided_at: int,
     return written["row"] if written["rows"] else None
 
 
+async def record_outcome(request_id: str, ok: bool, status: int | None,
+                         body: str, at: int) -> int:
+    """Store what an approved request's replay did, once; report if it did."""
+    return int((await tools.record_outcome(
+        request_id, ok, status, body, at, unit=_live()))["rows"])
+
+
+async def request_outcome(request_id: str) -> Row | None:
+    """A request's replay outcome, with the body the tool answered."""
+    return await tools.request_outcome(request_id, unit=_live())
+
+
 # ------------------------------------------------------------------- grants
 
 async def active_grant(tool_name: str, caller_mind: str,

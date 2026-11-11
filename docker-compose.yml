@@ -9,6 +9,10 @@ services:
         hive_data: ${HIVE_DATA_DIR:?set HIVE_DATA_DIR in .env}
     container_name: hive-tools
     env_file: .env
+    # Shutdown waits for approved calls still replaying, then records the
+    # rest as cut off and tells the asking mind. Docker's default 10s would
+    # SIGKILL it partway through that.
+    stop_grace_period: 30s
     ports:
       - "9421:9421"
     volumes:

@@ -6,8 +6,6 @@ import time
 import urllib.parse
 from typing import Any
 
-import asyncio
-
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -18,9 +16,9 @@ from auth_session import get_current_user_from_request
 from config import BASE_DIR
 from hitl import (
     UnknownAction,
-    _replay_request_async,
     effective_status,
     respond_to_hitl,
+    schedule_replay,
 )
 
 router = APIRouter()
@@ -186,8 +184,9 @@ async def hitl_ui_respond(
             f"That request was already {settled}, so nothing changed.")
 
     replay = result.pop("_replay", None)
-    if replay:
-        asyncio.create_task(_replay_request_async(**replay))
+    if result["status"] == "approved":
+        schedule_replay(request_id, result["tool_name"],
+                        result["caller_mind"], replay)
     return _back_to_queue(f"Request {result['status']}.")
 
 

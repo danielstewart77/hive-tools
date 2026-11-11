@@ -7,8 +7,9 @@ every coroutine test — runs on one loop, the suite's, held in a thread of
 its own for the session.
 
 The database is a scratch one, created and claimed for the run through
-`hive_data.testing`, with the `core` and `tools` schemas applied and every
-table emptied before each test. Never the live database: every DSN this
+`hive_data.testing`, brought to the schema by `hive_data.migrate` exactly as
+an install is, and with every `core` and `tools` table emptied before each
+test. Never the live database: every DSN this
 module touches is checked to be a scratch database first.
 """
 
@@ -20,7 +21,6 @@ import os
 import re
 from collections.abc import Coroutine, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
@@ -41,10 +41,9 @@ NO_SERVER = (
 #: sweeps and claims.
 SCRATCH_PREFIX = "hive_data_test_"
 
-#: `core` as well as `tools`, although hive-tools touches no `core` table:
-#: the access layer refuses to open a pool against a database with no `core`
-#: schema at all, on the grounds that such a database is not this hive's.
-_SCHEMAS = ("core.sql", "tools.sql")
+#: The schemas emptied before each test. The scratch database holds every
+#: schema `hive_data.migrate` applies; these are the two hive-tools' tests
+#: write - `core` because the access layer refuses a database without it.
 _SCHEMA_NAMES = ("core", "tools")
 
 
@@ -117,7 +116,7 @@ class ScratchDatabase:
     @classmethod
     async def create(cls) -> ScratchDatabase:
         import asyncpg
-        import hive_data
+        from hive_data import migrate
         from hive_data.testing import open_claimed, sweep_stale
 
         admin = await asyncpg.connect(ADMIN_DSN)
@@ -128,13 +127,9 @@ class ScratchDatabase:
         claimed = await open_claimed(ADMIN_DSN, SCRATCH_PREFIX)
         try:
             scratch = cls(claimed)
-            directory = Path(hive_data.__file__).parent / "schema"
-            target = await asyncpg.connect(scratch.dsn)
-            try:
-                for name in _SCHEMAS:
-                    await target.execute((directory / name).read_text())
-            finally:
-                await target.close()
+            # Through the migration, as an install is, so a step added
+            # after the baseline - a column hive-tools reads - is here too.
+            await migrate.apply(scratch.dsn)
         except BaseException:
             await claimed.close()
             raise

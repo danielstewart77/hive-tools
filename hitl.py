@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import time
 import uuid
 from typing import Any
 
+import httpx
 from fastapi import Depends, Request
 
 import store
@@ -133,37 +136,274 @@ async def _check_hitl(
     raise HITLPendingException(request_id)
 
 
-async def _replay_request_async(method: str, path: str, body: str) -> None:
-    """Re-execute the original request as a background task after HITL approval."""
+#: The replay's transport. None is httpx's real one, to this process's own
+#: port; tests swap in a MockTransport for the far side of the call.
+_REPLAY_TRANSPORT: httpx.AsyncBaseTransport | None = None
+
+#: The transport to hive-comms, for telling the asking mind. Same rule.
+_COMMS_TRANSPORT: httpx.AsyncBaseTransport | None = None
+
+#: How long a replay may take to answer. Long, because the gated tools
+#: include a browser search that waits on a page for over a minute and a
+#: compose `up` that may pull or build. A replay cut off early is reported
+#: as failed while the tool may still finish, which invites a retry that
+#: does the thing twice.
+REPLAY_TIMEOUT_SECONDS = 900
+COMMS_TIMEOUT_SECONDS = 10
+
+#: The longest error carried in the message to the mind.
+MESSAGE_ERROR_CHARS = 1000
+
+#: The longest result carried in the message to the mind. The full body is
+#: on the request row and `GET /hitl/{id}` returns it; the message is a
+#: wake-up prompt, and a browser page in one is a turn spent reading it.
+MESSAGE_RESULT_CHARS = 4000
+
+#: What the broker files the message under, and what a mind's skill keys on.
+HITL_RESULT_REQUEST_TYPE = "hitl_result"
+
+#: Replays still running, and whose they are. Held because the event loop
+#: keeps only a weak reference to a task, so a fire-and-forget replay can be
+#: collected before it finishes; and so shutdown can land an outcome for
+#: each one before the store closes.
+_IN_FLIGHT: dict[asyncio.Task[None], tuple[str, str, str]] = {}
+
+#: What a replay still running at shutdown is recorded as.
+CUT_OFF_ERROR = (
+    "hive-tools shut down before the replay answered, so whether the tool "
+    "ran is unknown; check its effect before making the call again")
+
+
+def schedule_replay(request_id: str, tool_name: str, caller_mind: str,
+                    replay: dict[str, str] | None) -> asyncio.Task[None]:
+    """Run an approved request's call in the background and report it."""
+    task = asyncio.create_task(
+        replay_and_report(request_id, tool_name, caller_mind, replay))
+    _IN_FLIGHT[task] = (request_id, tool_name, caller_mind)
+    task.add_done_callback(lambda done: _IN_FLIGHT.pop(done, None))
+    return task
+
+
+async def settle_replays(timeout: float | None = None) -> None:
+    """Wait for every replay in flight to land its outcome.
+
+    Given a timeout, a replay still running when it passes is cancelled and
+    recorded as cut off, and the mind told so, rather than left approved
+    with no outcome for ever - which `GET /hitl/{id}` cannot tell from a
+    replay still running.
+    """
+    pending = dict(_IN_FLIGHT)
+    if not pending:
+        return
+    _, unfinished = await asyncio.wait(set(pending), timeout=timeout)
+    for task in unfinished:
+        task.cancel()
+    if unfinished:
+        await asyncio.wait(unfinished)
+    for task in unfinished:
+        request_id, tool_name, caller_mind = pending[task]
+        await _land(request_id, tool_name, caller_mind, None,
+                    json.dumps({"error": CUT_OFF_ERROR}))
+
+
+def _parsed(text: str) -> Any:
+    """A response body as JSON when it is JSON, otherwise the text."""
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _error_in(status: int | None, result: Any) -> str | None:
+    """The tool's own error, or None when the call succeeded.
+
+    Every gated tool answers through the same HTTP surface, so success is
+    judged there and not per tool: a status outside 2xx is a refusal, and a
+    2xx is still a failure when the body says so in any of the shapes this
+    service's routes report a caught failure in - `{"error": ...}` (gmail,
+    calendar, sms, linkedin), `{"ok": false, ...}` (schema), `{"status":
+    "error", ...}` (docker compose exiting non-zero) and `{"_error": ...}`
+    (ollama). Counting any of them as success is how an approved send that
+    never left would be reported as sent.
+    """
+    if isinstance(result, dict):
+        for key in ("error", "_error"):
+            if result.get(key):
+                return str(result[key])
+        if result.get("ok") is False:
+            return str(result.get("detail") or result.get("code")
+                       or "the tool answered ok: false")
+        if result.get("status") == "error":
+            return str(result.get("stderr") or result.get("detail")
+                       or f"the tool exited {result.get('return_code')}")
+    if status is None or not 200 <= status < 300:
+        if isinstance(result, dict) and result.get("detail"):
+            return str(result["detail"])
+        text = result if isinstance(result, str) else json.dumps(result)
+        return (f"the replay answered HTTP {status}: {text[:500]}"
+                if status is not None else text[:500])
+    return None
+
+
+async def _run_replay(method: str, path: str,
+                      body: str) -> tuple[int | None, str]:
+    """Re-make the call, as `(HTTP status, body)`; status None if it never ran."""
     from config import INTERNAL_SECRET
 
+    url = f"http://127.0.0.1:9421{path}"
+    headers = {
+        "Authorization": f"Internal {INTERNAL_SECRET}",
+        "Content-Type": "application/json",
+    }
     try:
-        import httpx
-
-        url = f"http://127.0.0.1:9421{path}"
-        headers = {
-            "Authorization": f"Internal {INTERNAL_SECRET}",
-            "Content-Type": "application/json",
-        }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(transport=_REPLAY_TRANSPORT) as client:
             response = await client.request(
-                method, url, content=body, headers=headers, timeout=30)
-        # What the replay answered, not merely that it answered. An approved
-        # gmail send whose replay 500s used to be logged as a success beside
-        # a `replay_scheduled=True` from the route - so nothing anywhere
-        # learned that the tool Daniel approved never ran.
-        if response.is_success:
-            log.info("HITL replay succeeded: %s %s -> %d",
-                     method, path, response.status_code)
-        else:
-            log.warning(
-                "HITL replay was refused: %s %s -> %d. The request is "
-                "recorded as approved and the tool did not run; it has to be "
-                "re-made rather than re-approved, because a decided request "
-                "cannot be decided again. Response: %s",
-                method, path, response.status_code, response.text[:500])
-    except Exception:
+                method, url, content=body, headers=headers,
+                timeout=REPLAY_TIMEOUT_SECONDS)
+    except httpx.TimeoutException as exc:
+        log.warning("HITL replay timed out: %s %s", method, path)
+        return None, json.dumps(
+            {"error": f"the replay did not answer within "
+                      f"{REPLAY_TIMEOUT_SECONDS}s ({type(exc).__name__}), so "
+                      "whether the tool ran is unknown; check its effect "
+                      "before making the call again"})
+    except Exception as exc:  # noqa: BLE001 - every failure is an outcome
         log.warning("HITL replay failed: %s %s", method, path, exc_info=True)
+        return None, json.dumps(
+            {"error": f"the replay never got an answer: "
+                      f"{type(exc).__name__}: {exc}"})
+    return response.status_code, response.text
+
+
+async def replay_and_report(request_id: str, tool_name: str, caller_mind: str,
+                            replay: dict[str, str] | None) -> None:
+    """Replay an approved call, store what it did, then tell the mind.
+
+    Stored before it is sent, and a failure to send never touches what was
+    stored: the row is the record, and the message is only the asking mind
+    being told the record exists. A request approved with no captured call
+    has nothing to replay, which is a failure the mind is told about rather
+    than an approval that silently did nothing.
+    """
+    if replay is None:
+        status: int | None = None
+        text = json.dumps({"error": "the request was approved, but it holds "
+                                    "no captured call to replay, so the tool "
+                                    "did not run"})
+    else:
+        status, text = await _run_replay(
+            replay["method"], replay["path"], replay["body"])
+    await _land(request_id, tool_name, caller_mind, status, text)
+
+
+async def _land(request_id: str, tool_name: str, caller_mind: str,
+                status: int | None, text: str) -> None:
+    """Store an outcome, then tell the mind; the store first, always."""
+    result = _parsed(text)
+    error = _error_in(status, result)
+    ok = error is None
+    if ok:
+        log.info("HITL replay succeeded: %s %s -> %s", tool_name, request_id,
+                 status)
+    else:
+        log.warning("HITL replay failed: %s %s -> %s: %s", tool_name,
+                    request_id, status, error)
+    try:
+        written = await store.record_outcome(
+            request_id, ok, status, text, int(time.time()))
+    except Exception:
+        log.exception("HITL outcome for %s could not be stored", request_id)
+        return
+    if not written:
+        # Already has one. A second replay of one approval should not exist;
+        # if it does, the first answer stands and nobody is told twice.
+        log.warning("HITL outcome for %s was already recorded", request_id)
+        return
+    try:
+        await notify_caller(request_id, tool_name, caller_mind, ok, status,
+                            result, error)
+    except Exception:
+        log.warning("HITL result for %s could not be sent to %s; the outcome "
+                    "is stored and GET /hitl/%s returns it", request_id,
+                    caller_mind, request_id, exc_info=True)
+
+
+def _comms() -> tuple[str, dict[str, str]] | None:
+    url = os.environ.get("COMMS_URL", "").strip().rstrip("/")
+    token = os.environ.get("COMMS_BEARER_TOKEN", "").strip()
+    if not url or not token:
+        return None
+    return url, {"Authorization": f"Bearer {token}"}
+
+
+async def notify_caller(request_id: str, tool_name: str, caller_mind: str,
+                        ok: bool, status: int | None, result: Any,
+                        error: str | None) -> bool:
+    """Send the asking mind one broker message carrying the outcome.
+
+    Addressed the way a scheduler wakes a mind: from the mind to itself,
+    which the broker delivers into that mind's standing wake session, on a
+    conversation id of its own. hive-tools knows the caller by its API token
+    name and the broker routes by mind id, so the name is resolved against
+    the broker's registry first. hive-tools' comms credential is a service
+    one, which may name any mind as the sender. Returns whether it was sent.
+    """
+    comms = _comms()
+    if comms is None:
+        log.warning("HITL result for %s not sent: COMMS_URL or "
+                    "COMMS_BEARER_TOKEN is unset", request_id)
+        return False
+    base, headers = comms
+    async with httpx.AsyncClient(transport=_COMMS_TRANSPORT,
+                                 timeout=COMMS_TIMEOUT_SECONDS) as client:
+        listed = await client.get(f"{base}/broker/minds", headers=headers)
+        listed.raise_for_status()
+        wanted = caller_mind.strip().lower()
+        mind_id = next(
+            (str(m["id"]) for m in listed.json()
+             if str(m.get("id", "")).lower() == wanted
+             or str(m.get("name", "")).lower() == wanted), None)
+        if mind_id is None:
+            log.warning("HITL result for %s not sent: no registered mind is "
+                        "called %r", request_id, caller_mind)
+            return False
+        shown = result if isinstance(result, str) else json.dumps(result)
+        if len(shown) > MESSAGE_RESULT_CHARS:
+            shown = (shown[:MESSAGE_RESULT_CHARS]
+                     + f"... [truncated; GET /hitl/{request_id} has it whole]")
+        if error is not None and len(error) > MESSAGE_ERROR_CHARS:
+            error = error[:MESSAGE_ERROR_CHARS] + "... [truncated]"
+        verdict = "succeeded" if ok else f"FAILED: {error}"
+        content = (
+            f"HITL result for your {tool_name} call (request {request_id}): "
+            f"Daniel approved it, hive-tools ran it, and it {verdict} "
+            f"(HTTP {status if status is not None else 'none'}).\n"
+            f"Result: {shown}\n"
+            "Tell Daniel what actually happened.")
+        sent = await client.post(f"{base}/broker/messages", headers=headers,
+                                 json={
+            "message_id": str(uuid.uuid4()),
+            "conversation_id": str(uuid.uuid4()),
+            "from": mind_id,
+            "to": mind_id,
+            "content": content,
+            "rolling_summary": "",
+            "metadata": {
+                "request_type": HITL_RESULT_REQUEST_TYPE,
+                "triggered_by": "hive-tools",
+                "expects_reply": False,
+                "hitl_request_id": request_id,
+                "tool_name": tool_name,
+                "success": ok,
+                "http_status": status,
+                "error": error,
+                "result": shown,
+            },
+        })
+        sent.raise_for_status()
+    log.info("HITL result for %s sent to %s (%s)", request_id, caller_mind,
+             mind_id)
+    return True
 
 
 def hitl_gate(tool_name: str):
@@ -295,8 +535,14 @@ def effective_status(row: dict[str, Any], now: int) -> str:
     return str(row["status"])
 
 
-async def get_hitl_status(request_id: str) -> dict[str, Any] | None:
-    """Get the current status of a HITL request, accounting for expiry."""
+async def get_hitl_status(request_id: str,
+                          caller: str | None = None) -> dict[str, Any] | None:
+    """Get the current status of a HITL request, accounting for expiry.
+
+    The outcome is the tool's whole answer - a page's text, a sent message's
+    id - so it goes to the mind that asked and nobody else: given a `caller`
+    that is not the request's, the status is reported without it.
+    """
     row = await store.request(request_id)
 
     if row is None:
@@ -305,12 +551,35 @@ async def get_hitl_status(request_id: str) -> dict[str, Any] | None:
     now = int(time.time())
     status = effective_status(row, now)
 
-    return {
+    answer: dict[str, Any] = {
         "hitl_request_id": row["id"],
         "status": status,
         "tool_name": row["tool_name"],
         "caller_mind": row["caller_mind"],
         "decided_at": row["decided_at"],
+    }
+    if status == "approved" and (caller is None
+                                 or caller == row["caller_mind"]):
+        # None while the replay is still running, and for a request approved
+        # before outcomes were recorded: approved is not the same as done.
+        answer["outcome"] = None
+        if row.get("outcome_at") is not None:
+            stored = await store.request_outcome(request_id)
+            if stored is not None:
+                answer["outcome"] = outcome_view(stored)
+    return answer
+
+
+def outcome_view(stored: dict[str, Any]) -> dict[str, Any]:
+    """A stored outcome as `GET /hitl/{id}` reports it."""
+    status = stored["outcome_status"]
+    result = _parsed(stored["outcome_body"] or "")
+    return {
+        "success": bool(stored["outcome_ok"]),
+        "http_status": status,
+        "result": result,
+        "error": None if stored["outcome_ok"] else _error_in(status, result),
+        "at": stored["outcome_at"],
     }
 
 

@@ -6,8 +6,6 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-import asyncio
-
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -25,10 +23,11 @@ from hitl import (
     HITLPendingException,
     UncapturableCall,
     UnknownAction,
-    _replay_request_async,
     get_hitl_status,
     respond_to_hitl,
+    schedule_replay,
     seed_default_hitl_settings,
+    settle_replays,
     sync_tool_registry,
 )
 from hive_logging import configure_logging, install_fastapi_logging, log_event
@@ -38,6 +37,12 @@ from tools.docker_ops import BlockedProjectError
 log = configure_logging("hive-tools")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+#: How long shutdown waits for replays in flight before recording each one
+#: still running as cut off. Inside the container's stop grace period
+#: (`stop_grace_period` in docker-compose.yml), with room left to record
+#: and send those outcomes.
+REPLAY_SETTLE_SECONDS = 10
 
 
 def _already_seeded(exc: BaseException) -> bool:
@@ -114,6 +119,10 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            # A replay still running when the process stops would otherwise
+            # reach a closed store and lose the outcome it was about to
+            # record. Bounded, because shutdown must still happen.
+            await settle_replays(timeout=REPLAY_SETTLE_SECONDS)
             await store.close()
 
     app = FastAPI(
@@ -159,7 +168,7 @@ def create_app() -> FastAPI:
         request_id: str,
         caller: str = Depends(require_api_token),
     ) -> Any:
-        status = await get_hitl_status(request_id)
+        status = await get_hitl_status(request_id, caller)
         if status is None:
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
@@ -190,12 +199,17 @@ def create_app() -> FastAPI:
         if "error" in result and result["error"] == "already_resolved":
             return JSONResponse(result, status_code=409)
         replay = result.pop("_replay", None)
+        approved = result["status"] == "approved"
         log_event(
             log, "hitl.responded", request_id=request_id, action=body.action,
-            caller=caller, replay_scheduled=bool(replay),
+            caller=caller, replay_scheduled=approved,
         )
-        if replay:
-            asyncio.create_task(_replay_request_async(**replay))
+        if approved:
+            # Every approval gets an outcome, including one with no captured
+            # call to replay: that is reported as a failure rather than as an
+            # approval that silently did nothing.
+            schedule_replay(request_id, result["tool_name"],
+                            result["caller_mind"], replay)
         return JSONResponse(result, status_code=200)
 
     # ---- Dashboard (requires session auth) ----
