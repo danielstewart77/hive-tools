@@ -216,6 +216,8 @@ _DEFAULT_HITL_SETTINGS: list[tuple[str, str, int]] = [
     ("gmail_reply_email", "on", 15),
     ("gmail_delete_email", "on", 15),
     ("gmail_move_email", "on", 15),
+    ("gmail_create_label", "on", 15),
+    ("gmail_unsubscribe", "on", 15),
     # LinkedIn -- on
     ("linkedin_post", "on", 15),
     # Docker mutating -- on
