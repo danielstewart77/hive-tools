@@ -47,6 +47,18 @@ separately they leave an end state nothing can recover from — the request
 says approved, the call it authorised was never replayed, and the decision
 is guarded on `pending` so it can never be approved again.
 
+An approval replays the captured call with the internal credential, and what
+the replay did is stored on the request: whether it succeeded, its HTTP
+status, and the body the tool answered with. A status outside 2xx, a replay
+that never got an answer, and a 2xx whose body carries `error` (a tool that
+caught its own failure) are all stored as failed. `GET /hitl/{id}` returns it
+as `outcome` on an approved request — `null` until the replay has landed —
+and hive-tools then sends the asking mind one broker message through
+hive-comms (`POST /broker/messages`, from and to that mind's id, on a fresh
+conversation id, `metadata.request_type` `hitl_result`), using the
+`COMMS_URL` and `COMMS_BEARER_TOKEN` service credential. A message that
+cannot be delivered is logged; the stored outcome stands.
+
 A gated call whose body holds a NUL byte is refused with a 400 rather than
 queued. A NUL is valid UTF-8, so `errors="replace"` leaves it alone, and
 Postgres refuses it outright. Refused rather than escaped,

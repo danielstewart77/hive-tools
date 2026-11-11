@@ -642,6 +642,12 @@ async def unsubscribe(
                 "outcome": "unsubscribed" if ok else "failed",
                 "http_status": resp.status_code,
             })
+            if not ok:
+                # Said as an error, because `error` is what an approved
+                # replay's outcome is judged failed by, for every tool.
+                result["error"] = (
+                    f"the one-click unsubscribe endpoint answered "
+                    f"{resp.status_code}")
         elif plan["method"] == "mailto":
             to, subject, text = _parse_mailto(plan["mailto"])
             if not to:
@@ -656,8 +662,8 @@ async def unsubscribe(
             result.update({"outcome": "needs_browser", "needs_browser": True})
         else:
             result.update({"outcome": "no_unsubscribe_header"})
-        # Logged because an approved call's response goes to the HITL replay,
-        # not to the mind that asked: this line is where it can be read.
+        # Logged as well as returned: an approved call's response is stored
+        # as the request's outcome, and this line is the host's own copy.
         log.info("gmail unsubscribe %s: %s", body.message_id, result)
         return result
     except Exception as e:
